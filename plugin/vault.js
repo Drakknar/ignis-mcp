@@ -157,6 +157,24 @@ async function readNote(vault, relPath) {
   }
 }
 
+const MAX_LINES_PER_NOTE = 5;
+
+// Quoted phrases stay whole; other words are split on anything that isn't a letter or digit.
+function parseTerms(query, caseSensitive) {
+  const terms = [];
+
+  for (const m of query.matchAll(/"([^"]+)"|[\p{L}\p{N}]+/gu)) {
+    const term = (m[1] || m[0]).trim();
+
+    if (term.length >= 2) {
+      terms.push(caseSensitive ? term : term.toLowerCase());
+    }
+  }
+
+  return [...new Set(terms)];
+}
+
+// Returns the parsed terms and a find(text) giving the indexes of the terms present in it.
 function buildMatcher(query, { regex, caseSensitive }) {
   if (regex) {
     let re;
@@ -167,58 +185,105 @@ function buildMatcher(query, { regex, caseSensitive }) {
       throw new ToolError(`Invalid regex: ${e.message}`);
     }
 
-    return (text) => re.test(text);
+    return { terms: [query], find: (text) => (re.test(text) ? [0] : []) };
   }
 
-  const needle = caseSensitive ? query : query.toLowerCase();
-  return (text) =>
-    (caseSensitive ? text : text.toLowerCase()).includes(needle);
+  const terms = parseTerms(query, caseSensitive);
+
+  if (terms.length === 0) {
+    throw new ToolError("The query has no searchable words");
+  }
+
+  return {
+    terms,
+    find: (text) => {
+      const hay = caseSensitive ? text : text.toLowerCase();
+      const found = [];
+
+      terms.forEach((t, i) => {
+        if (hay.includes(t)) {
+          found.push(i);
+        }
+      });
+
+      return found;
+    },
+  };
 }
 
+// Keyword search over whole notes: every word must appear somewhere in the note (file name
+// included), in any order. When no note has them all, notes with the most (and rarest) words win.
 async function searchNotes(vault, opts) {
   const base = resolveInVault(vault, opts.folder);
   const exts = normalizeExtensions(opts.extensions) || [".md"];
-  const matches = buildMatcher(opts.query, opts);
-  const results = [];
-  let truncated = false;
+  const { terms, find } = buildMatcher(opts.query, opts);
+  const notes = [];
 
-  outer: for await (const file of walk(base.abs, vault.root)) {
+  for await (const file of walk(base.abs, vault.root)) {
     if (!exts.includes(path.extname(file.rel).toLowerCase())) {
       continue;
     }
 
-    if (matches(file.rel)) {
-      if (results.length >= opts.limit) {
-        truncated = true;
-        break;
-      }
-
-      results.push({ path: file.rel, line: 0, text: "(file name match)" });
-    }
-
+    const present = new Set(find(file.rel));
+    const lines = present.size ? [{ line: 0, text: "(file name match)", hits: present.size }] : [];
     const stat = await fs.promises.stat(file.abs);
 
-    if (stat.size > MAX_SEARCH_FILE_BYTES) {
-      continue;
+    if (stat.size <= MAX_SEARCH_FILE_BYTES) {
+      const content = (await fs.promises.readFile(file.abs, "utf-8")).split(/\r?\n/);
+
+      for (let i = 0; i < content.length; i++) {
+        const found = find(content[i]);
+
+        if (found.length) {
+          found.forEach((t) => present.add(t));
+          lines.push({ line: i + 1, text: content[i].trim().slice(0, 300), hits: found.length });
+        }
+      }
     }
 
-    const lines = (await fs.promises.readFile(file.abs, "utf-8")).split(/\r?\n/);
-
-    for (let i = 0; i < lines.length; i++) {
-      if (!matches(lines[i])) {
-        continue;
-      }
-
-      if (results.length >= opts.limit) {
-        truncated = true;
-        break outer;
-      }
-
-      results.push({ path: file.rel, line: i + 1, text: lines[i].trim().slice(0, 300) });
+    if (present.size) {
+      notes.push({ path: file.rel, present, lines });
     }
   }
 
-  return { results, truncated };
+  // Rarer words weigh more, so "to" or "the" can't outrank "Wohnung".
+  const docFreq = terms.map((_, i) => notes.filter((n) => n.present.has(i)).length);
+  const weight = docFreq.map((df) => Math.log(1 + (notes.length + 1) / (df || 1)));
+
+  let matched = "all";
+  let hits = notes.filter((n) => n.present.size === terms.length);
+
+  if (hits.length === 0 && terms.length > 1) {
+    matched = "any";
+    hits = notes;
+  }
+
+  const scored = hits.map((n) => ({
+    ...n,
+    score: [...n.present].reduce((sum, t) => sum + weight[t], 0),
+  }));
+  scored.sort((a, b) => b.score - a.score || b.lines.length - a.lines.length);
+
+  const results = scored.slice(0, opts.limit).map((n) => ({
+    path: n.path,
+    matchedTerms: [...n.present].sort((a, b) => a - b).map((t) => terms[t]),
+    matchingLines: n.lines.length,
+    lines: [...n.lines]
+      .sort((a, b) => b.hits - a.hits || a.line - b.line)
+      .slice(0, MAX_LINES_PER_NOTE)
+      .sort((a, b) => a.line - b.line)
+      .map(({ line, text }) => ({ line, text })),
+  }));
+
+  const result = { terms, matched, results, truncated: scored.length > opts.limit };
+
+  if (results.length === 0) {
+    result.hint = "Nothing matched. Try fewer or different keywords, synonyms, or the language the notes are written in.";
+  } else if (matched === "any") {
+    result.hint = "No note contains every term; these contain some of them, best first.";
+  }
+
+  return result;
 }
 
 // Inserting at the very top would break a note's YAML frontmatter, so prepend goes right after it.

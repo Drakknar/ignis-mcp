@@ -96,15 +96,15 @@ function registerTools(server, ctx) {
     {
       title: "Search notes",
       description:
-        "Search note file names and contents. Returns matching lines with their path and line number (line 0 = file name match).",
+        "Keyword search across note names and contents. Pass a few short keywords, not a whole question: for \"What do I need to buy a flat in Berlin?\" search \"flat Berlin buy\". A note matches when it contains every keyword anywhere, in any order (\"Wohnung\" also matches \"Wohnungskauf\"); put a phrase in double quotes to keep it together. If no note has them all, the notes with the most keywords come back instead (matched: \"any\"). Results are notes, best first, each with its most relevant lines (line 0 = file name match). Search again with synonyms or another language if nothing useful comes back, then call read_note on the best paths before answering.",
       inputSchema: {
         vault: vaultArg,
-        query: z.string().min(1).describe("Text to find, or a regular expression when regex is true."),
-        regex: z.boolean().default(false),
+        query: z.string().min(1).describe("Keywords, e.g. \"flat Berlin\" or \"\\\"notary appointment\\\" Wohnung\". A regular expression when regex is true."),
+        regex: z.boolean().default(false).describe("Treat query as one regular expression matched line by line."),
         caseSensitive: z.boolean().default(false),
         folder: folderArg,
         extensions: extensionsArg.describe("File extensions to search. Defaults to [\"md\"]."),
-        limit: z.number().int().min(1).max(500).default(50),
+        limit: z.number().int().min(1).max(200).default(20).describe("Maximum number of notes to return."),
       },
       annotations: { readOnlyHint: true },
     },

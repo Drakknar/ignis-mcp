@@ -67,7 +67,22 @@ call read_note '{"path":"Welcome.md"}' | jq -e '.structuredContent.content | con
 
 echo "search_notes finds content but not .obsidian"
 call search_notes '{"query":"NEEDLE"}' \
-  | jq -e '.structuredContent.results == [{"path":"Welcome.md","line":5,"text":"The needle is here."}]' >/dev/null
+  | jq -e '.structuredContent.results == [{"path":"Welcome.md","matchedTerms":["needle"],"matchingLines":1,"lines":[{"line":5,"text":"The needle is here."}]}]' >/dev/null
+
+echo "search_notes matches all words across lines and the file name, in any order"
+call search_notes '{"query":"here is the needle, welcome?"}' \
+  | jq -e '.structuredContent | .matched == "all" and ([.results[].path] == ["Welcome.md"]) and (.results[0].lines[0].line == 0)' >/dev/null
+
+echo "search_notes falls back to the best partial matches"
+call search_notes '{"query":"needle nothing zzzz"}' \
+  | jq -e '.structuredContent | .matched == "any" and ([.results[].path] | sort == ["Projects/Plan.md","Welcome.md"])' >/dev/null
+
+echo "search_notes keeps quoted phrases whole"
+call search_notes '{"query":"\"needle is here\""}' | jq -e '[.structuredContent.results[].path] == ["Welcome.md"]' >/dev/null
+call search_notes '{"query":"\"here is needle\""}' | jq -e '.structuredContent.results == [] and (.structuredContent.hint | length > 0)' >/dev/null
+
+echo "search_notes regex"
+call search_notes '{"query":"^Nothing to","regex":true}' | jq -e '[.structuredContent.results[].path] == ["Projects/Plan.md"]' >/dev/null
 
 echo "write_note create, then read back from disk"
 call write_note '{"path":"Inbox/New idea","content":"hello from MCP\n"}' \
