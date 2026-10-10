@@ -1,0 +1,103 @@
+name: Build image
+
+# Rebuild whenever nobbe/ignis:latest changes or the plugin changes.
+on:
+  schedule:
+    - cron: "37 */6 * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if nothing changed
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: docker.io/nobbe/ignis:latest
+  IMAGE: ghcr.io/${{ github.repository_owner }}/ignis
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide whether to build
+        id: check
+        env:
+          GHCR_CREDS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
+          PLUGIN_HASH: ${{ hashFiles('Dockerfile', 'plugin/**') }}
+        run: |
+          set -euo pipefail
+          image="${IMAGE,,}"
+          upstream=$(skopeo inspect --raw "docker://$UPSTREAM" | sha256sum | cut -d' ' -f1)
+          upstream="sha256:$upstream"
+          key="$upstream/$PLUGIN_HASH"
+          current=$(skopeo inspect --creds "$GHCR_CREDS" "docker://$image:latest" 2>/dev/null \
+            | jq -r '.Labels["net.stefanopignataro.build-key"] // ""' || true)
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          if [ "$current" = "$key" ] && [ "${{ inputs.force }}" != "true" ]; then
+            echo "Up to date ($key)"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Building: '$current' -> '$key'"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.check.outputs.build == 'true'
+
+      - uses: docker/login-action@v3
+        if: steps.check.outputs.build == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build test image
+        uses: docker/build-push-action@v6
+        if: steps.check.outputs.build == 'true'
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: ignis-test
+          build-args: |
+            BASE_IMAGE=docker.io/nobbe/ignis@${{ steps.check.outputs.upstream }}
+
+      # Exercises every MCP tool against a throwaway vault. If it fails,
+      # nothing is published and the next scheduled run tries again.
+      - name: Smoke test
+        if: steps.check.outputs.build == 'true'
+        run: bash scripts/smoke-test.sh ignis-test
+
+      - name: Publish
+        uses: docker/build-push-action@v6
+        if: steps.check.outputs.build == 'true'
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            BASE_IMAGE=docker.io/nobbe/ignis@${{ steps.check.outputs.upstream }}
+          tags: |
+            ${{ steps.check.outputs.image }}:latest
+            ${{ steps.check.outputs.image }}:${{ github.run_number }}
+          labels: |
+            net.stefanopignataro.build-key=${{ steps.check.outputs.key }}
+            org.opencontainers.image.base.name=${{ env.UPSTREAM }}
+            org.opencontainers.image.base.digest=${{ steps.check.outputs.upstream }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later

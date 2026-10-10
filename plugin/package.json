@@ -1,0 +1,15 @@
+{
+  "name": "ignis-plugin-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ignis server plugin that exposes enabled vaults over MCP (Streamable HTTP)",
+  "main": "index.js",
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "zod": "^3.25.76"
+  }
+}
