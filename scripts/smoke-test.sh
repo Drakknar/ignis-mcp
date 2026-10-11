@@ -101,7 +101,8 @@ call write_note '{"path":"Inbox/Garden","content":"Plant tomatoes and basil in M
 call semantic_search '{"query":"tomatoes basil"}' | jq -e '.structuredContent.results[0].path == "Inbox/Garden.md"' >/dev/null
 
 echo "semantic_search index is saved in the plugin data folder"
-docker exec ignis-smoke find / -name semantic-Test-fake-embed.json -not -path '/proc/*' 2>/dev/null | grep -q .
+# find exits non-zero on unreadable folders, which pipefail would treat as a failure.
+docker exec ignis-smoke sh -c 'find / -name semantic-Test-fake-embed.json -not -path "/proc/*" 2>/dev/null || true' | grep -q .
 
 echo "write_note create, then read back from disk"
 call write_note '{"path":"Inbox/New idea","content":"hello from MCP\n"}' \
