@@ -3,8 +3,10 @@ const {
   StreamableHTTPServerTransport,
 } = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const { registerTools } = require("./tools");
+const { resolveVault } = require("./vault");
+const semantic = require("./semantic");
 
-const SERVER_INFO = { name: "ignis-vaults", version: "0.1.0" };
+const SERVER_INFO = { name: "ignis-vaults", version: "0.2.0" };
 
 module.exports = {
   id: "mcp",
@@ -60,17 +62,33 @@ module.exports = {
     ctx.router.delete("/", notAllowed);
 
     ctx.log(`MCP endpoint ready at /api/ext/${this.id}`);
+
+    const embed = semantic.embedConfig();
+    ctx.log(
+      embed
+        ? `Semantic search on: ${embed.model} at ${embed.url}${embed.options.num_gpu === 0 ? " (CPU)" : ""}`
+        : "Semantic search off (set MCP_EMBED_URL to an Ollama server to enable it)",
+    );
   },
 
   async shutdown() {
+    semantic.stopAll();
     this._ctx = null;
   },
 
   async onVaultEnabled(vaultId) {
     this._ctx?.log(`Vault exposed over MCP: ${vaultId}`);
+
+    // Index in the background; Ignis awaits this hook during startup.
+    try {
+      semantic.startVault(this._ctx, resolveVault(this._ctx, vaultId));
+    } catch (e) {
+      this._ctx?.log(`Semantic index not started for ${vaultId}: ${e.message}`);
+    }
   },
 
   async onVaultDisabled(vaultId) {
+    semantic.stopVault(vaultId);
     this._ctx?.log(`Vault no longer exposed over MCP: ${vaultId}`);
   },
 };
