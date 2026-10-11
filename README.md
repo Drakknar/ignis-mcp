@@ -43,7 +43,7 @@ The `vault` argument is optional when only one vault is enabled. Hidden folders 
 - `Dockerfile`: installs the plugin's dependencies in a separate stage and copies the plugin into the upstream image. The build fails if upstream moves its plugins folder.
 - `scripts/smoke-test.sh <image>`: runs the image, enables the plugin through `POST /api/plugins/mcp/enable` (the call the Ignis UI makes), and checks each tool.
 - `.github/workflows/build.yml`: the 6-hourly check, smoke test and publish.
-  If a scheduled build fails on a new upstream image, Claude (`anthropics/claude-code-action`, secret `CLAUDE_CODE_OAUTH_TOKEN`, instructions in `.github/prompts/upstream-fix.md`) diagnoses it. It proposes a fix as a pull request, which `build.yml` checks on its branch without publishing, or opens an issue. `.github/scripts/watch.sh` records on the `watch-state` branch what has been handled.
+  If a scheduled build fails on a new upstream image, Claude (`anthropics/claude-code-action`, secret `CLAUDE_CODE_OAUTH_TOKEN`, instructions in `.github/prompts/upstream-fix.md`) diagnoses it and proposes a fix as a pull request, or opens an issue. The workflow then runs `build.yml` on the fix's branch, without publishing, and posts the result on the pull request; a failed check turns it into a draft. While an `upstream-fix` pull request or issue is open, new failures wait. `.github/scripts/watch.sh` records on the `watch-state` branch what has been handled.
 
 To test locally: `docker build -t ignis-test . && bash scripts/smoke-test.sh ignis-test`
 

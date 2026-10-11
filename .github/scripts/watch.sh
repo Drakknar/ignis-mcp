@@ -7,6 +7,7 @@
 #                             was transient (an outage) more than a day ago
 #   watch.sh get KEY          KEY's stored value, empty if none
 #   watch.sh set K=V...       stores values
+#   watch.sh has-open LABEL   "true" if an open issue or pull request has LABEL
 #   watch.sh report DIR       turns DIR/verdict.json and DIR/changes.patch into a
 #                             pull request and/or issues, then records WATCH_KEYS
 #
@@ -16,7 +17,12 @@
 #                   other pairs are then skipped, so nothing moves forward).
 #   WATCH_SUBJECT   what was reviewed, for titles ("Home Assistant 2026.11.0")
 #   WATCH_BRANCH    branch name for a pull request
-#   WATCH_DISPATCH  optional workflow file to run on that branch to verify it
+#   WATCH_DISPATCH  optional workflow file to run on that branch to verify it;
+#                   the result is posted on the pull request
+#   WATCH_MODE      "fix" when a failed build was reviewed: a verdict of "clear"
+#                   with no changes then still opens an issue, since the build
+#                   is still failing
+#   WATCH_EXTRA_LABEL  optional second label for everything opened
 #
 # Needs GH_TOKEN and the standard GITHUB_* variables.
 set -euo pipefail
@@ -24,6 +30,9 @@ set -euo pipefail
 STATE_BRANCH=watch-state
 STATE_FILE=state.json
 LABEL=upstream-watch
+BODY_LIMIT=60000 # characters; GitHub allows 65536 per body
+# Bodies go to gh as files: one command-line argument is limited to 128 KB on
+# Linux, which a long report in a multi-byte script can exceed.
 repo=$GITHUB_REPOSITORY
 
 # Prints the contents API response, or nothing if there is no state yet. On an
@@ -52,6 +61,13 @@ should_run() {
 			;;
 		*) echo false ;;
 	esac
+}
+
+has_open() {
+	local n
+	n=$(gh issue list -R "$repo" --state open --label "$1" --limit 1 --json number --jq length)
+	n=$((n + $(gh pr list -R "$repo" --state open --label "$1" --limit 1 --json number --jq length)))
+	if [ "$n" -gt 0 ]; then echo true; else echo false; fi
 }
 
 create_state_branch() {
@@ -104,29 +120,65 @@ open_issue() {
 		echo "$existing"
 		return 0
 	fi
-	gh issue create -R "$repo" --title "$title" --body "$body" --label "$labels" --assignee "$GITHUB_REPOSITORY_OWNER"
+	printf '%s' "$body" >"$RUNNER_TEMP/watch-body.md"
+	gh issue create -R "$repo" --title "$title" --body-file "$RUNNER_TEMP/watch-body.md" --label "$labels" \
+		--assignee "$GITHUB_REPOSITORY_OWNER"
+}
+
+# Runs WATCH_DISPATCH on the pull request's branch, waits for it and posts the
+# result on the pull request. A failed check turns the pull request into a draft.
+# Runs started by the Actions token send no failure email, hence the comment.
+verify_branch() {
+	local branch=$1 pr_url=$2 run_id="" url
+	gh workflow run "$WATCH_DISPATCH" -R "$repo" --ref "$branch" -f force=true
+	for _ in $(seq 24); do
+		sleep 5
+		run_id=$(gh run list -R "$repo" --workflow "$WATCH_DISPATCH" --branch "$branch" --event workflow_dispatch \
+			--limit 1 --json databaseId --jq '.[0].databaseId // ""')
+		[ -n "$run_id" ] && break
+	done
+	if [ -z "$run_id" ]; then
+		gh pr comment "$pr_url" -R "$repo" --body "Couldn't find the \`$WATCH_DISPATCH\` run started on this branch. Run it by hand before merging."
+		return 0
+	fi
+	url="$GITHUB_SERVER_URL/$repo/actions/runs/$run_id"
+	echo "Verification run: $url"
+	if timeout 55m gh run watch "$run_id" -R "$repo" --interval 30 --exit-status >/dev/null 2>&1; then
+		gh pr comment "$pr_url" -R "$repo" --body "Check passed: \`$WATCH_DISPATCH\` built and tested this branch without publishing ([run]($url))."
+	elif [ "$(gh run view "$run_id" -R "$repo" --json status --jq .status)" != completed ]; then
+		gh pr comment "$pr_url" -R "$repo" --body "\`$WATCH_DISPATCH\` on this branch was still running after 55 minutes ([run]($url)). Check it before merging."
+	else
+		gh pr ready "$pr_url" -R "$repo" --undo >/dev/null 2>&1 || true
+		gh pr comment "$pr_url" -R "$repo" --body "**Check failed:** \`$WATCH_DISPATCH\` failed on this branch ([run]($url)), so this pull request is now a draft. Don't merge it as it is."
+	fi
 }
 
 report() {
-	local dir=$1 run_url status title body improvements footer pr_url="" issue_url="" branch value kv
+	local dir=$1 run_url status title body improvements footer labels pr_url="" issue_url="" branch="" value kv
 	local -a pairs=()
 	run_url="$GITHUB_SERVER_URL/$repo/actions/runs/$GITHUB_RUN_ID"
 	footer=$'\n\n---\n'"Opened by the Claude upstream watch ([run]($run_url)). Review the change before merging."
+	labels=$LABEL${WATCH_EXTRA_LABEL:+,$WATCH_EXTRA_LABEL}
 
 	gh label create "$LABEL" -R "$repo" --color 5319e7 --description "Opened by the Claude upstream watch" --force >/dev/null
-	gh label create enhancement -R "$repo" --color a2eeef --force >/dev/null
+	if [ -n "${WATCH_EXTRA_LABEL:-}" ]; then
+		gh label create "$WATCH_EXTRA_LABEL" -R "$repo" --color d93f0b \
+			--description "Claude's handling of a failed upstream build; new failures wait until this is closed" --force >/dev/null
+	fi
+	gh label list -R "$repo" --search enhancement --json name --jq '.[].name' | grep -qx enhancement ||
+		gh label create enhancement -R "$repo" --color a2eeef --description "New feature or request" >/dev/null
 
 	if [ -s "$dir/verdict.json" ] && jq -e '.status and .title and .report' "$dir/verdict.json" >/dev/null 2>&1; then
 		status=$(jq -r .status "$dir/verdict.json")
 		title=$(jq -r .title "$dir/verdict.json")
-		body=$(jq -r .report "$dir/verdict.json" | head -c 60000)
-		improvements=$(jq -r '.improvements // ""' "$dir/verdict.json" | head -c 60000)
+		body=$(jq -r --argjson n "$BODY_LIMIT" '.report[0:$n]' "$dir/verdict.json")
+		improvements=$(jq -r --argjson n "$BODY_LIMIT" '(.improvements // "")[0:$n]' "$dir/verdict.json")
 	else
 		# No verdict: Claude didn't run or didn't finish (expired token, usage
 		# limit, timeout). Report it, record nothing, and retry next run.
 		open_issue "Claude upstream watch failed: $WATCH_SUBJECT" \
 			"The review for $WATCH_SUBJECT produced no result. Check the run log, and the CLAUDE_CODE_OAUTH_TOKEN secret if Claude didn't start.$footer" \
-			"$LABEL" >/dev/null
+			"$labels" >/dev/null
 		echo "::error::No verdict from Claude"
 		return 1
 	fi
@@ -152,30 +204,34 @@ report() {
 		git apply --index "$dir/changes.patch"
 		git commit -m "$title" -m "Proposed by the Claude upstream watch after reviewing $WATCH_SUBJECT."
 		git push origin "HEAD:refs/heads/$branch"
+		printf '%s' "$body$footer" >"$RUNNER_TEMP/watch-body.md"
 		pr_url=$(gh pr create -R "$repo" --base "$(gh api "repos/$repo" --jq .default_branch)" --head "$branch" \
-			--title "$title" --body "$body$footer" --label "$LABEL" --assignee "$GITHUB_REPOSITORY_OWNER")
+			--title "$title" --body-file "$RUNNER_TEMP/watch-body.md" --label "$labels" --assignee "$GITHUB_REPOSITORY_OWNER")
 		echo "Pull request: $pr_url"
-		if [ -n "${WATCH_DISPATCH:-}" ]; then
-			gh workflow run "$WATCH_DISPATCH" -R "$repo" --ref "$branch" -f force=true
-			gh pr comment "$pr_url" -R "$repo" --body "Started \`$WATCH_DISPATCH\` on this branch to check the fix (it never publishes from a branch): $GITHUB_SERVER_URL/$repo/actions/workflows/$WATCH_DISPATCH?query=branch%3A$branch"
-		fi
 	elif [ "$status" = fixed ]; then
 		status=needs_attention
 		body="Claude reported a fix but left no changes, so this needs a look.
 
 $body"
+	elif [ "$status" = clear ] && [ "${WATCH_MODE:-}" = fix ]; then
+		status=needs_attention
+		body="The build failed, but Claude found nothing to change and didn't call it an outage. The build is still failing, so this needs a look.
+
+$body"
 	fi
 
 	if [ "$status" = needs_attention ]; then
-		[ -n "$pr_url" ] && body="$body
+		if [ -n "$pr_url" ]; then
+			body="$body
 
 Proposed fix: $pr_url"
-		issue_url=$(open_issue "$title" "$body$footer" "$LABEL")
+		fi
+		issue_url=$(open_issue "$title" "$body$footer" "$labels")
 		echo "Issue: $issue_url"
 	fi
 
 	if [ -n "$improvements" ]; then
-		open_issue "Ideas from $WATCH_SUBJECT" "$improvements$footer" "$LABEL,enhancement"
+		open_issue "Ideas from $WATCH_SUBJECT" "$improvements$footer" "$LABEL,enhancement" >/dev/null
 	fi
 
 	value="done:$(date -u +%F)"
@@ -186,19 +242,25 @@ Proposed fix: $pr_url"
 
 	{
 		echo "## $status: $title"
-		[ -n "$pr_url" ] && echo "Pull request: $pr_url"
-		[ -n "$issue_url" ] && echo "Issue: $issue_url"
+		if [ -n "$pr_url" ]; then echo "Pull request: $pr_url"; fi
+		if [ -n "$issue_url" ]; then echo "Issue: $issue_url"; fi
 		echo
 		echo "$body"
 	} >>"$GITHUB_STEP_SUMMARY"
+
+	# Last, so a slow or stuck check can't keep the review from being recorded.
+	if [ -n "$pr_url" ] && [ -n "${WATCH_DISPATCH:-}" ]; then
+		verify_branch "$branch" "$pr_url"
+	fi
 }
 
-cmd=${1:?usage: watch.sh should-run|get|set|report ...}
+cmd=${1:?usage: watch.sh should-run|get|set|has-open|report ...}
 shift
 case "$cmd" in
 	should-run) should_run "$1" ;;
 	get) get "$1" ;;
 	set) set_state "$@" ;;
+	has-open) has_open "$1" ;;
 	report) report "$1" ;;
 	*) echo "unknown command $cmd" >&2; exit 2 ;;
 esac
