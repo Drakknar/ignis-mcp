@@ -345,8 +345,11 @@ function normalizeExtensions(exts) {
 }
 
 module.exports = {
+  MAX_SEARCH_FILE_BYTES,
   ToolError,
   resolveVault,
+  resolveInVault,
+  walk,
   listNotes,
   readNote,
   searchNotes,

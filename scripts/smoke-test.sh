@@ -6,6 +6,7 @@ set -euo pipefail
 
 image=${1:?usage: smoke-test.sh <image>}
 port=18080
+embed_port=18434
 base=http://localhost:$port
 work=$(mktemp -d)
 vault=$work/vaults/Test
@@ -14,12 +15,19 @@ mkdir -p "$vault/.obsidian" "$vault/Projects"
 printf -- '---\ntags: [demo]\n---\n# Welcome\nThe needle is here.\n' > "$vault/Welcome.md"
 printf 'Nothing to see.\n' > "$vault/Projects/Plan.md"
 printf '{"needle": "hidden config must not be searched"}\n' > "$vault/.obsidian/app.json"
+printf '# Heating\nThe yearly boiler inspection was on 3 March.\n' > "$vault/Projects/House.md"
+
+# Stand-in for Ollama's embedding API, reached from the container through the host gateway.
+node "$(dirname "$0")/fake-embed.js" $embed_port &
+embed_pid=$!
 
 docker run -d --name ignis-smoke -p $port:8080 \
+  --add-host=host.docker.internal:host-gateway \
+  -e MCP_EMBED_URL=http://host.docker.internal:$embed_port -e MCP_EMBED_MODEL=fake-embed \
   -e PUID="$(id -u)" -e PGID="$(id -g)" \
   -v "$work/vaults:/vaults" "$image" >/dev/null
 
-cleanup() { docker rm -f ignis-smoke >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f ignis-smoke >/dev/null 2>&1 || true; kill $embed_pid 2>/dev/null || true; }
 trap cleanup EXIT
 trap 'echo "--- container log"; docker logs ignis-smoke 2>&1 | tail -n 60' ERR
 
@@ -54,13 +62,13 @@ rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"
 
 echo "tools/list has all tools"
 rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  | jq -e '[.result.tools[].name] | sort == ["list_notes","list_vaults","read_note","search_notes","write_note"]' >/dev/null
+  | jq -e '[.result.tools[].name] | sort == ["list_notes","list_vaults","read_note","search_notes","semantic_search","write_note"]' >/dev/null
 
 echo "list_vaults"
 call list_vaults '{}' | jq -e '.structuredContent.vaults == ["Test"]' >/dev/null
 
 echo "list_notes skips hidden folders"
-call list_notes '{}' | jq -e '[.structuredContent.notes[].path] == ["Projects/Plan.md","Welcome.md"]' >/dev/null
+call list_notes '{}' | jq -e '[.structuredContent.notes[].path] == ["Projects/House.md","Projects/Plan.md","Welcome.md"]' >/dev/null
 
 echo "read_note"
 call read_note '{"path":"Welcome.md"}' | jq -e '.structuredContent.content | contains("needle")' >/dev/null
@@ -83,6 +91,17 @@ call search_notes '{"query":"\"here is needle\""}' | jq -e '.structuredContent.r
 
 echo "search_notes regex"
 call search_notes '{"query":"^Nothing to","regex":true}' | jq -e '[.structuredContent.results[].path] == ["Projects/Plan.md"]' >/dev/null
+
+echo "semantic_search matches by meaning, best passage first"
+call semantic_search '{"query":"when was the heater serviced?"}' \
+  | jq -e '.structuredContent.results[0] | .path == "Projects/House.md" and .passages[0].heading == "Heating" and .passages[0].line == 2' >/dev/null
+
+echo "semantic_search finds a note right after write_note"
+call write_note '{"path":"Inbox/Garden","content":"Plant tomatoes and basil in May.\n"}' | jq -e '.isError != true' >/dev/null
+call semantic_search '{"query":"tomatoes basil"}' | jq -e '.structuredContent.results[0].path == "Inbox/Garden.md"' >/dev/null
+
+echo "semantic_search index is saved in the plugin data folder"
+docker exec ignis-smoke find / -name semantic-Test-fake-embed.json -not -path '/proc/*' 2>/dev/null | grep -q .
 
 echo "write_note create, then read back from disk"
 call write_note '{"path":"Inbox/New idea","content":"hello from MCP\n"}' \

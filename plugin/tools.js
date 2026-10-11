@@ -7,6 +7,7 @@ const {
   searchNotes,
   writeNote,
 } = require("./vault");
+const { embedConfig, noteChanged, semanticSearch } = require("./semantic");
 
 const vaultArg = z
   .string()
@@ -113,6 +114,28 @@ function registerTools(server, ctx) {
     ),
   );
 
+  // Only offered when an embedding server is configured (MCP_EMBED_URL).
+  if (embedConfig()) {
+    server.registerTool(
+      "semantic_search",
+      {
+        title: "Search notes by meaning",
+        description:
+          "Search notes by meaning instead of exact words: finds notes about the same thing even when they use other words or another language (\"when was the heating last checked?\" finds a note titled \"Boiler service\"). Pass a natural question or description. Results are notes, best first, with their most relevant passages and a similarity score (0-1; above about 0.5 is usually relevant). Use it for vague questions or when search_notes finds nothing; use search_notes for exact names, numbers or phrases. Call read_note on the best paths before answering.",
+        inputSchema: {
+          vault: vaultArg,
+          query: z.string().min(1).describe("A question or description, e.g. \"what did the notary say about the flat purchase?\"."),
+          folder: folderArg,
+          limit: z.number().int().min(1).max(50).default(8).describe("Maximum number of notes to return."),
+        },
+        annotations: { readOnlyHint: true },
+      },
+      wrap(ctx, "semantic_search", async ({ vault, ...opts }) =>
+        semanticSearch(ctx, resolveVault(ctx, vault), opts),
+      ),
+    );
+  }
+
   server.registerTool(
     "write_note",
     {
@@ -127,9 +150,12 @@ function registerTools(server, ctx) {
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     },
-    wrap(ctx, "write_note", async ({ vault, path, content, mode }) =>
-      writeNote(resolveVault(ctx, vault), path, content, mode),
-    ),
+    wrap(ctx, "write_note", async ({ vault, path, content, mode }) => {
+      const v = resolveVault(ctx, vault);
+      const result = await writeNote(v, path, content, mode);
+      noteChanged(ctx, v);
+      return result;
+    }),
   );
 }
 
