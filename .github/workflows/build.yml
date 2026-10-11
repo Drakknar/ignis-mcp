@@ -18,7 +18,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: build
+  group: build-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -28,6 +28,10 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+      key: ${{ steps.check.outputs.key }}
+      upstream: ${{ steps.check.outputs.upstream }}
     steps:
       - uses: actions/checkout@v4
 
@@ -82,9 +86,11 @@ jobs:
         if: steps.check.outputs.build == 'true'
         run: bash scripts/smoke-test.sh ignis-test
 
+      # Only main publishes. A run on another branch (such as a fix proposed by
+      # the Claude job below) just builds and tests.
       - name: Publish
         uses: docker/build-push-action@v6
-        if: steps.check.outputs.build == 'true'
+        if: steps.check.outputs.build == 'true' && github.ref == 'refs/heads/main'
         with:
           context: .
           platforms: linux/amd64
@@ -101,3 +107,123 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=AGPL-3.0-or-later
+
+  # A scheduled or manual build on main that fails on a new upstream version
+  # goes to Claude, which diagnoses it and proposes a fix as a pull request, or
+  # opens an issue. Each failing build key is handled once (an outage is retried
+  # after a day). Failures after your own pushes are left to you.
+  triage:
+    needs: build
+    if: failure() && needs.build.outputs.build == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Already handled?
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEY: fix:${{ needs.build.outputs.key }}
+        run: echo "run=$(bash .github/scripts/watch.sh should-run "$KEY")" >> "$GITHUB_OUTPUT"
+
+  fix:
+    needs: [build, triage]
+    if: always() && needs.triage.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gather context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GHCR_CREDS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
+          FAILING: ${{ needs.build.outputs.upstream }}
+        run: |
+          set -euo pipefail
+          job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" \
+            --jq '.jobs[] | select(.name == "build") | .id')
+          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" > "$RUNNER_TEMP/build.log" \
+            || echo "(log unavailable)" > "$RUNNER_TEMP/build.log"
+          image="${IMAGE,,}"
+          last=$(skopeo inspect --creds "$GHCR_CREDS" "docker://$image:latest" 2>/dev/null || echo '{}')
+          cat > "$RUNNER_TEMP/watch-context.md" <<CTX
+          # Build failure
+          - Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          - Build log of the failed job: $RUNNER_TEMP/build.log
+          - Upstream image: $UPSTREAM
+            - Last good: $(jq -r '.Labels["org.opencontainers.image.base.digest"] // "unknown"' <<<"$last"), published as $image:latest on $(jq -r '.Created // "unknown"' <<<"$last")
+            - Failing: $FAILING
+          - Upstream source: https://github.com/Nystik-gh/ignis
+          CTX
+
+      - name: Claude
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: >-
+            Follow the instructions in .github/prompts/upstream-fix.md.
+            The facts for this run are in ${{ runner.temp }}/watch-context.md.
+          claude_args: >-
+            --model opus
+            --max-turns 150
+            --allowedTools "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,TodoWrite"
+            --json-schema '{"type":"object","properties":{"status":{"type":"string","enum":["clear","fixed","needs_attention","transient"]},"title":{"type":"string"},"report":{"type":"string"},"improvements":{"type":"string"}},"required":["status","title","report","improvements"]}'
+
+      # Only the verdict and a diff of the working tree leave this job. The
+      # report job, which can write, turns them into a pull request or issues.
+      - name: Collect result
+        if: always()
+        env:
+          VERDICT: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/watch"
+          printf '%s' "$VERDICT" > "$RUNNER_TEMP/watch/verdict.json"
+          git add -A
+          git diff --cached --binary "$GITHUB_SHA" -- . ':(exclude).github' > "$RUNNER_TEMP/watch/changes.patch"
+          git diff --cached --stat "$GITHUB_SHA" -- . ':(exclude).github'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: watch
+          path: ${{ runner.temp }}/watch/
+          retention-days: 14
+
+  report:
+    needs: [build, fix]
+    if: always() && needs.fix.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: watch
+          path: ${{ runner.temp }}/watch
+
+      - name: Open pull request / issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WATCH_KEYS: fix:${{ needs.build.outputs.key }}=@
+          WATCH_SUBJECT: ${{ env.UPSTREAM }} update
+          WATCH_BRANCH: claude/fix-upstream-${{ github.run_number }}
+          WATCH_DISPATCH: build.yml
+        run: bash .github/scripts/watch.sh report "$RUNNER_TEMP/watch"
