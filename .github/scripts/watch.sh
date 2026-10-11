@@ -26,8 +26,13 @@ STATE_FILE=state.json
 LABEL=upstream-watch
 repo=$GITHUB_REPOSITORY
 
+# Prints the contents API response, or nothing if there is no state yet. On an
+# error gh still prints the error body to stdout, so only a success counts.
 fetch_state() {
-	gh api "repos/$repo/contents/$STATE_FILE?ref=$STATE_BRANCH" 2>/dev/null || true
+	local resp
+	if resp=$(gh api "repos/$repo/contents/$STATE_FILE?ref=$STATE_BRANCH" 2>/dev/null); then
+		printf '%s\n' "$resp"
+	fi
 }
 
 get() {
