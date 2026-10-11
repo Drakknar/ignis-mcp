@@ -266,6 +266,11 @@ jobs:
           git clone -q --no-checkout "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$clean"
           git -C "$clean" -c advice.detachedHead=false checkout -q "$GITHUB_SHA"
           rsync -a --delete --exclude=/.git --exclude=/.github "$GITHUB_WORKSPACE/" "$clean/"
+          # Claude's sandbox leaves empty placeholder files (.env, .npmrc,
+          # package.json, lock files) where it blocks writes. A review never needs
+          # to add an empty file, so new empty files are dropped.
+          git -C "$clean" ls-files -z --others --exclude-standard |
+            (cd "$clean" && xargs -0 -r -I{} find {} -maxdepth 0 -type f -empty -delete)
           git -C "$clean" add -A
           git -C "$clean" diff --cached --binary > "$out/changes.patch"
           git -C "$clean" diff --cached --stat
