@@ -15,7 +15,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: build-${{ github.ref }}
@@ -26,14 +25,23 @@ env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/ignis
 
 jobs:
+  # Builds and tests with read-only access. It runs upstream code, and on a
+  # branch possibly a fix proposed by Claude, so it never holds a token that
+  # can publish.
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     outputs:
       build: ${{ steps.check.outputs.build }}
       key: ${{ steps.check.outputs.key }}
       upstream: ${{ steps.check.outputs.upstream }}
+      image: ${{ steps.check.outputs.image }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Decide whether to build
         id: check
@@ -62,13 +70,6 @@ jobs:
       - uses: docker/setup-buildx-action@v3
         if: steps.check.outputs.build == 'true'
 
-      - uses: docker/login-action@v3
-        if: steps.check.outputs.build == 'true'
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Build test image
         uses: docker/build-push-action@v6
         if: steps.check.outputs.build == 'true'
@@ -86,24 +87,43 @@ jobs:
         if: steps.check.outputs.build == 'true'
         run: bash scripts/smoke-test.sh ignis-test
 
-      # Only main publishes. A run on another branch (such as a fix proposed by
-      # the Claude job below) just builds and tests.
+  # The only job with write access. It runs no upstream or proposed code;
+  # it rebuilds the tested image from the same digest and Dockerfile.
+  publish:
+    needs: build
+    if: needs.build.outputs.build == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Publish
         uses: docker/build-push-action@v6
-        if: steps.check.outputs.build == 'true' && github.ref == 'refs/heads/main'
         with:
           context: .
           platforms: linux/amd64
           push: true
           build-args: |
-            BASE_IMAGE=docker.io/nobbe/ignis@${{ steps.check.outputs.upstream }}
+            BASE_IMAGE=docker.io/nobbe/ignis@${{ needs.build.outputs.upstream }}
           tags: |
-            ${{ steps.check.outputs.image }}:latest
-            ${{ steps.check.outputs.image }}:${{ github.run_number }}
+            ${{ needs.build.outputs.image }}:latest
+            ${{ needs.build.outputs.image }}:${{ github.run_number }}
           labels: |
-            net.stefanopignataro.build-key=${{ steps.check.outputs.key }}
+            net.stefanopignataro.build-key=${{ needs.build.outputs.key }}
             org.opencontainers.image.base.name=${{ env.UPSTREAM }}
-            org.opencontainers.image.base.digest=${{ steps.check.outputs.upstream }}
+            org.opencontainers.image.base.digest=${{ needs.build.outputs.upstream }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=AGPL-3.0-or-later
@@ -151,6 +171,8 @@ jobs:
       packages: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Gather context
         env:
@@ -175,9 +197,38 @@ jobs:
           - Upstream source: https://github.com/Nystik-gh/ignis
           CTX
 
+      # Claude reads untrusted upstream content, so the commands it runs are
+      # kept away from the Claude token (tested 2026-10-11):
+      # - the action's subprocess scrub (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB below)
+      #   removes it from their environment, and bubblewrap hides every other
+      #   process from them (the action installs it only for workflows open to
+      #   outside users, so it is installed here);
+      # - no process can read another's memory (ptrace_scope 2), and sudo is
+      #   gone for the rest of the job, so nothing can read the runner's memory.
+      # Docker stays available because this job needs it to build and test, and
+      # Docker access amounts to root, so here a determined attack could still
+      # get around the isolation.
+      # What remains visible to them is the job's read-only GitHub token.
+      - name: Isolate Claude's commands
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends bubblewrap socat >/dev/null
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          sudo sysctl -qw kernel.yama.ptrace_scope=2
+          sudo rm -f /etc/sudoers.d/runner
+          if sudo -n true 2>/dev/null; then
+            echo "::error::sudo is still available"
+            exit 1
+          fi
+
       - name: Claude
         id: claude
         uses: anthropics/claude-code-action@v1
+        env:
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
@@ -190,25 +241,41 @@ jobs:
             --allowedTools "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,TodoWrite"
             --json-schema '{"type":"object","properties":{"status":{"type":"string","enum":["clear","fixed","needs_attention","transient"]},"title":{"type":"string"},"report":{"type":"string"},"improvements":{"type":"string"}},"required":["status","title","report","improvements"]}'
 
-      # Only the verdict and a diff of the working tree leave this job. The
-      # report job, which can write, turns them into a pull request or issues.
+      # Runs after Claude in the same job, so it ignores what Claude's commands
+      # could have planted: variables written to $GITHUB_ENV (the step's own env
+      # wins), directories added to PATH (absolute shell, fixed PATH) and hooks,
+      # config or filters in the workspace's .git (the diff is made in a fresh
+      # clone). JavaScript actions can't be shielded the same way (a planted
+      # NODE_OPTIONS wins over the step's), so after Claude only the artifact
+      # upload is one; code planted there still can't reach the Claude token.
+      # Only the verdict and the diff leave this job. The report job, which can
+      # write, turns them into a pull request or issues.
       - name: Collect result
         if: always()
+        shell: /bin/bash --noprofile --norc -eo pipefail {0}
         env:
           VERDICT: ${{ steps.claude.outputs.structured_output }}
+          BASH_ENV: ""
+          ENV: ""
         run: |
-          mkdir -p "$RUNNER_TEMP/watch"
-          printf '%s' "$VERDICT" > "$RUNNER_TEMP/watch/verdict.json"
-          git add -A
-          git diff --cached --binary "$GITHUB_SHA" -- . ':(exclude).github' > "$RUNNER_TEMP/watch/changes.patch"
-          git diff --cached --stat "$GITHUB_SHA" -- . ':(exclude).github'
+          export PATH=/usr/bin:/bin GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+          out="$RUNNER_TEMP/watch"
+          clean="$RUNNER_TEMP/watch-clean"
+          mkdir -p "$out"
+          printf '%s' "$VERDICT" > "$out/verdict.json"
+          git clone -q --no-checkout "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$clean"
+          git -C "$clean" -c advice.detachedHead=false checkout -q "$GITHUB_SHA"
+          rsync -a --delete --exclude=/.git --exclude=/.github "$GITHUB_WORKSPACE/" "$clean/"
+          git -C "$clean" add -A
+          git -C "$clean" diff --cached --binary > "$out/changes.patch"
+          git -C "$clean" diff --cached --stat
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: watch
           path: ${{ runner.temp }}/watch/
-          retention-days: 14
+          retention-days: 1
 
   report:
     needs: [build, fix]
@@ -231,9 +298,12 @@ jobs:
           name: watch
           path: ${{ runner.temp }}/watch
 
+      # WATCH_SECRET only lets the script refuse to publish output that contains
+      # the Claude token. No code from the review runs in this job.
       - name: Open pull request / issues
         env:
           GH_TOKEN: ${{ github.token }}
+          WATCH_SECRET: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           WATCH_KEYS: fix:${{ needs.build.outputs.key }}=@
           WATCH_SUBJECT: ${{ env.UPSTREAM }} update
           WATCH_BRANCH: claude/fix-upstream-${{ github.run_number }}
@@ -241,3 +311,16 @@ jobs:
           WATCH_MODE: fix
           WATCH_EXTRA_LABEL: upstream-fix
         run: bash .github/scripts/watch.sh report "$RUNNER_TEMP/watch"
+
+      # Artifacts of public repositories can be downloaded by anyone signed in
+      # to GitHub, so the review's raw output doesn't outlive this run.
+      - name: Delete the review's files
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" \
+            --jq '.artifacts[] | select(.name == "watch") | .id' |
+            while read -r id; do
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
+            done

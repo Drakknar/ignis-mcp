@@ -23,6 +23,8 @@
 #                   with no changes then still opens an issue, since the build
 #                   is still failing
 #   WATCH_EXTRA_LABEL  optional second label for everything opened
+#   WATCH_SECRET    the Claude token. If the verdict or the diff contains it, or
+#                   a piece of it, nothing is published (see leaks below)
 #
 # Needs GH_TOKEN and the standard GITHUB_* variables.
 set -euo pipefail
@@ -125,6 +127,28 @@ open_issue() {
 		--assignee "$GITHUB_REPOSITORY_OWNER"
 }
 
+# Succeeds if a file in DIR contains WATCH_SECRET: whole, base64-encoded, or any
+# 20-character piece of it (checked every 10 characters, so any 30 consecutive
+# characters are caught). The repositories are public, so a pull request or
+# issue would publish the token. Encoded or scrambled copies can't be caught;
+# the subprocess scrub in the review job is what keeps Claude away from it.
+leaks() {
+	local dir=$1 s=${WATCH_SECRET:-} i f p
+	local -a pieces=()
+	[ ${#s} -ge 20 ] || return 1
+	pieces+=("$s" "$(printf '%s' "$s" | base64 -w0)")
+	for ((i = 0; i + 20 <= ${#s}; i += 10)); do
+		pieces+=("${s:i:20}")
+	done
+	for f in "$dir/verdict.json" "$dir/changes.patch"; do
+		[ -f "$f" ] || continue
+		for p in "${pieces[@]}"; do
+			grep -qF -e "$p" "$f" && return 0
+		done
+	done
+	return 1
+}
+
 # Runs WATCH_DISPATCH on the pull request's branch, waits for it and posts the
 # result on the pull request. A failed check turns the pull request into a draft.
 # Runs started by the Actions token send no failure email, hence the comment.
@@ -167,6 +191,22 @@ report() {
 	fi
 	gh label list -R "$repo" --search enhancement --json name --jq '.[].name' | grep -qx enhancement ||
 		gh label create enhancement -R "$repo" --color a2eeef --description "New feature or request" >/dev/null
+
+	if leaks "$dir"; then
+		# Nothing from the review is published, not even in the log.
+		open_issue "Claude upstream watch withheld a report: $WATCH_SUBJECT" \
+			"The review's report or proposed change contained the CLAUDE_CODE_OAUTH_TOKEN secret, or part of it, so nothing from it was published. That points to a prompt injection in the upstream content Claude read.
+
+Treat the token as exposed:
+1. Create a new one with \`claude setup-token\`.
+2. Update the CLAUDE_CODE_OAUTH_TOKEN secret in every repository that uses it.
+3. Revoke the old token.
+
+The review's files are deleted at the end of this run; the run log doesn't contain them.$footer" \
+			"$labels" >/dev/null
+		echo "::error::The review output contained the Claude token; nothing was published"
+		return 1
+	fi
 
 	if [ -s "$dir/verdict.json" ] && jq -e '.status and .title and .report' "$dir/verdict.json" >/dev/null 2>&1; then
 		status=$(jq -r .status "$dir/verdict.json")

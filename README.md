@@ -44,6 +44,7 @@ The `vault` argument is optional when only one vault is enabled. Hidden folders 
 - `scripts/smoke-test.sh <image>`: runs the image, enables the plugin through `POST /api/plugins/mcp/enable` (the call the Ignis UI makes), and checks each tool.
 - `.github/workflows/build.yml`: the 6-hourly check, smoke test and publish.
   If a scheduled build fails on a new upstream image, Claude (`anthropics/claude-code-action`, secret `CLAUDE_CODE_OAUTH_TOKEN`, instructions in `.github/prompts/upstream-fix.md`) diagnoses it and proposes a fix as a pull request, or opens an issue. The workflow then runs `build.yml` on the fix's branch, without publishing, and posts the result on the pull request; a failed check turns it into a draft. While an `upstream-fix` pull request or issue is open, new failures wait. `.github/scripts/watch.sh` records on the `watch-state` branch what has been handled.
+  Only the `publish` job, which runs on `main` only, can push to the registry; building and testing run read-only. Claude's commands run without the Claude token, sudo or a view of other processes, but with Docker, which the fix needs. The report job won't publish output that contains the token.
 
 To test locally: `docker build -t ignis-test . && bash scripts/smoke-test.sh ignis-test`
 
