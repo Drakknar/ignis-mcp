@@ -4,8 +4,6 @@ name: Build image
 on:
   schedule:
     - cron: "37 */6 * * *"
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       force:
@@ -35,6 +33,7 @@ jobs:
       packages: read
     outputs:
       build: ${{ steps.check.outputs.build }}
+      upstream_changed: ${{ steps.check.outputs.upstream_changed }}
       key: ${{ steps.check.outputs.key }}
       upstream: ${{ steps.check.outputs.upstream }}
       image: ${{ steps.check.outputs.image }}
@@ -59,6 +58,11 @@ jobs:
           echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
           echo "key=$key" >> "$GITHUB_OUTPUT"
           echo "image=$image" >> "$GITHUB_OUTPUT"
+          if [ "${current%%/*}" = "$upstream" ]; then
+            echo "upstream_changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "upstream_changed=true" >> "$GITHUB_OUTPUT"
+          fi
           if [ "$current" = "$key" ] && [ "${{ inputs.force }}" != "true" ]; then
             echo "Up to date ($key)"
             echo "build=false" >> "$GITHUB_OUTPUT"
@@ -132,11 +136,12 @@ jobs:
   # goes to Claude, which diagnoses it and proposes a fix as a pull request, or
   # opens an issue. Each failing build key is handled once (an outage is retried
   # after a day), and nothing new starts while an earlier fix pull request or
-  # issue (label "upstream-fix") is open. Failures after your own pushes are left
-  # to you.
+  # issue (label "upstream-fix") is open. A failure while
+  # upstream is unchanged since the last publish comes from your own changes and
+  # is left to you.
   triage:
     needs: build
-    if: failure() && needs.build.outputs.build == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'push'
+    if: failure() && needs.build.outputs.build == 'true' && github.ref == 'refs/heads/main' && needs.build.outputs.upstream_changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
