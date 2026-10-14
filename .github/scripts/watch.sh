@@ -22,6 +22,13 @@
 #   WATCH_MODE      "fix" when a failed build was reviewed: a verdict of "clear"
 #                   with no changes then still opens an issue, since the build
 #                   is still failing
+#   WATCH_CLEAR_POLICY  "strict": a "clear" verdict is only acted on for changes
+#                   this script can check itself. Changes to CLAUDE.md files
+#                   alone open no pull request; a change to nothing but
+#                   "verified" versions in module.json is merged automatically;
+#                   anything else is a pull request to review, as without it.
+#                   Upstream content Claude read could have steered its verdict,
+#                   so nothing it wrote reaches the default branch unseen.
 #   WATCH_EXTRA_LABEL  optional second label for everything opened
 #   WATCH_SECRET    the Claude token. If the verdict or the diff contains it, or
 #                   a piece of it, nothing is published (see leaks below)
@@ -177,8 +184,51 @@ verify_branch() {
 	fi
 }
 
+# Succeeds if every file PATCH touches is a CLAUDE.md. A rename shows as
+# "old => new" and fails the match.
+notes_only() {
+	local path
+	git apply --numstat "$1" | cut -f3- | {
+		while IFS= read -r path; do
+			[[ "$path" =~ ^(.*/)?CLAUDE\.md$ ]] || return 1
+		done
+	}
+}
+
+# Succeeds if the staged change only sets "verified" versions in module.json
+# (top level and per game system) to plain version numbers. Compares the parsed
+# JSON, so formatting and key order don't matter.
+verified_only() {
+	local base staged rest='del(.compatibility.verified, .relationships.systems[]?.compatibility.verified)'
+	local versions='[.compatibility.verified, (.relationships.systems[]? | .compatibility.verified)] | map(select(. != null) | tostring)'
+	[ "$(git diff --cached --name-status)" = "$(printf 'M\tmodule.json')" ] || return 1
+	base=$(git show HEAD:module.json | jq -S .) || return 1
+	staged=$(git show :module.json | jq -S .) || return 1
+	[ "$(jq "$rest" <<<"$base")" = "$(jq "$rest" <<<"$staged")" ] || return 1
+	[ "$(jq -c "$versions" <<<"$base")" != "$(jq -c "$versions" <<<"$staged")" ] || return 1
+	jq -e --arg re '^[0-9]+(\.[0-9]+){0,3}$' "$versions | all(test(\$re))" <<<"$staged" >/dev/null
+}
+
+# Merges a pull request that verified_only passed. GitHub can refuse for a few
+# seconds while it computes mergeability, so it retries; if it still can't, the
+# pull request stays open for a person.
+auto_merge() {
+	local pr_url=$1 branch=$2 attempt
+	for attempt in 1 2 3; do
+		sleep $((attempt * 5))
+		if gh pr merge "$pr_url" -R "$repo" --squash; then
+			gh pr comment "$pr_url" -R "$repo" --body "Merged automatically: the review found nothing to change, and the only change is \`verified\` in module.json." >/dev/null
+			gh api -X DELETE "repos/$repo/git/refs/heads/$branch" >/dev/null 2>&1 || true
+			return 0
+		fi
+	done
+	gh pr comment "$pr_url" -R "$repo" --body "This only changes \`verified\` in module.json, but merging it automatically failed. Merge it by hand." >/dev/null
+	echo "::warning::Automatic merge of $pr_url failed"
+}
+
 report() {
 	local dir=$1 run_url status title body improvements footer labels pr_url="" issue_url="" branch="" value kv
+	local strict=false merge=false
 	local -a pairs=()
 	run_url="$GITHUB_SERVER_URL/$repo/actions/runs/$GITHUB_RUN_ID"
 	footer=$'\n\n---\n'"Opened by the Claude upstream watch ([run]($run_url)). Review the change before merging."
@@ -233,6 +283,17 @@ The review's files are deleted at the end of this run; the run log doesn't conta
 		return 0
 	fi
 
+	if [ "${WATCH_CLEAR_POLICY:-}" = strict ] && [ "$status" = clear ] && [ "${WATCH_MODE:-}" != fix ]; then
+		strict=true
+	fi
+	if $strict && [ -s "$dir/changes.patch" ] && notes_only "$dir/changes.patch"; then
+		echo "Clear verdict that only changes CLAUDE.md: no pull request"
+		body="$body
+
+_The review's edits to CLAUDE.md weren't committed: on a clear verdict only \`verified\` bumps go out._"
+		: >"$dir/changes.patch"
+	fi
+
 	if [ -s "$dir/changes.patch" ]; then
 		branch=$WATCH_BRANCH
 		if git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1; then
@@ -242,12 +303,22 @@ The review's files are deleted at the end of this run; the run log doesn't conta
 		git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 		git switch -c "$branch"
 		git apply --index "$dir/changes.patch"
+		if $strict; then
+			if [ -z "${WATCH_DISPATCH:-}" ] && verified_only; then
+				merge=true
+			else
+				body="**Claude called this clear but changed more than \`verified\` in module.json, so it needs a review.**
+
+$body"
+			fi
+		fi
 		git commit -m "$title" -m "Proposed by the Claude upstream watch after reviewing $WATCH_SUBJECT."
 		git push origin "HEAD:refs/heads/$branch"
 		printf '%s' "$body$footer" >"$RUNNER_TEMP/watch-body.md"
 		pr_url=$(gh pr create -R "$repo" --base "$(gh api "repos/$repo" --jq .default_branch)" --head "$branch" \
 			--title "$title" --body-file "$RUNNER_TEMP/watch-body.md" --label "$labels" --assignee "$GITHUB_REPOSITORY_OWNER")
 		echo "Pull request: $pr_url"
+		if $merge; then auto_merge "$pr_url" "$branch"; fi
 	elif [ "$status" = fixed ]; then
 		status=needs_attention
 		body="Claude reported a fix but left no changes, so this needs a look.
