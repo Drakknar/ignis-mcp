@@ -155,8 +155,7 @@ call read_note '{"path":"Root.md"}' | jq -e '.isError == true' >/dev/null
 call read_note '{"vault":"Other","path":"Root.md"}' | jq -e '.structuredContent.content | contains("Read me")' >/dev/null
 
 echo "write_note only writes inside MCP_WRITE_PATHS"
-call write_note '{"vault":"Other","path":"Inbox/Fact","content":"ok
-"}' | jq -e '.isError != true' >/dev/null
+call write_note '{"vault":"Other","path":"Inbox/Fact","content":"ok\n"}' | jq -e '.isError != true' >/dev/null
 grep -qx 'ok' "$other/Inbox/Fact.md"
 call write_note '{"vault":"Other","path":"Root.md","content":"x","mode":"overwrite"}' | jq -e '.isError == true' >/dev/null
 call write_note '{"vault":"Other","path":"Inboxes/Fact","content":"x"}' | jq -e '.isError == true' >/dev/null
