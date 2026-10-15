@@ -254,8 +254,10 @@ call write_note "$(jq -nc '{vault:"Other",path:"Inbox/nul\u0000byte",content:"x"
 echo "concurrent appends to one note all land"
 for i in $(seq 10); do
   call write_note "$(jq -nc --arg c "line $i" '{vault:"Other",path:"Inbox/Log",content:($c + "\n"),mode:"append"}')" >/dev/null &
+  pids+=($!)
 done
-wait
+# Only these calls: a bare wait would also wait for the fake embedding server.
+wait "${pids[@]}"
 [ "$(grep -c '^line ' "$other/Inbox/Log.md")" = 10 ]
 
 echo "the read token gets only the read tools"
