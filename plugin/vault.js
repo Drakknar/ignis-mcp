@@ -427,7 +427,6 @@ module.exports = {
   ToolError,
   defaultVault,
   writePaths,
-  isWritable,
   resolveVault,
   resolveInVault,
   walk,

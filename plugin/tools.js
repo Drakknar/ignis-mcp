@@ -2,7 +2,6 @@ const { z } = require("zod");
 const {
   ToolError,
   defaultVault,
-  writePaths,
   resolveVault,
   listNotes,
   readNote,
@@ -51,7 +50,7 @@ function wrap(ctx, name, fn) {
 }
 
 // access.writable: where this caller may write (null = anywhere), decided by its token in index.js.
-function registerTools(server, ctx, access = { writable: writePaths() }) {
+function registerTools(server, ctx, access) {
   server.registerTool(
     "list_vaults",
     {
@@ -195,7 +194,7 @@ function registerTools(server, ctx, access = { writable: writePaths() }) {
     {
       title: "Remember",
       description:
-        "Save something to the shared memory when the user asks you to remember it, or states a lasting fact or preference worth keeping. Pass one self-contained memory in plain sentences; the note, its folder and frontmatter are created for you, and a memory with the same title gets an update section instead of a duplicate. Search the memory first (semantic_search) and use edit_note to correct an existing memory. Never store passwords, tokens or other secrets.",
+        "Save something to the shared memory when the user asks you to remember it. Pass one self-contained memory in plain sentences; the note, its folder and frontmatter are created for you, and a memory with the same title gets an update section instead of a duplicate. Search the memory first (semantic_search) and use edit_note to correct an existing memory. Never store passwords, tokens or other secrets.",
       inputSchema: {
         text: z.string().min(1).describe("The memory, self-contained, e.g. \"The user prefers the heating at 20 °C in the evening.\""),
         title: z.string().optional().describe("Short note title, e.g. \"Evening heating preference\". Defaults to the first words of text."),

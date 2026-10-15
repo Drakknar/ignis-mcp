@@ -7,7 +7,7 @@ const { registerTools } = require("./tools");
 const { resolveVault, writePaths } = require("./vault");
 const semantic = require("./semantic");
 
-const SERVER_INFO = { name: "ignis-vaults", version: "0.6.0" };
+const SERVER_INFO = { name: "ignis-vaults", version: "0.6.1" };
 
 function sha256(s) {
   return crypto.createHash("sha256").update(s).digest();
@@ -52,7 +52,11 @@ module.exports = {
     this._ctx = ctx;
 
     // MCP_TOKEN = agents, limited by MCP_WRITE_PATHS; MCP_ADMIN_TOKEN = write anywhere. Neither set = open, agent limits.
-    const tokens = { agent: process.env.MCP_TOKEN || "", admin: process.env.MCP_ADMIN_TOKEN || "" };
+    // Trimmed like the presented token, so a stray space in the container setting doesn't lock everyone out.
+    const tokens = {
+      agent: (process.env.MCP_TOKEN || "").trim(),
+      admin: (process.env.MCP_ADMIN_TOKEN || "").trim(),
+    };
     const auth = Boolean(tokens.agent || tokens.admin);
 
     if (auth) {

@@ -35,15 +35,18 @@ function yamlString(s) {
   return JSON.stringify(String(s));
 }
 
-// Sets top-level keys in a note's YAML frontmatter, adding the block when there is none. Other keys stay as they are.
+// Sets top-level keys in a note's YAML frontmatter (null removes one), adding the block when there is none.
+// Other keys stay as they are.
 function setFrontmatter(text, fields) {
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/);
-  const body = m ? m[1].split(/\r?\n/) : [];
+  let body = m ? m[1].split(/\r?\n/) : [];
 
   for (const [k, v] of Object.entries(fields)) {
     const i = body.findIndex((l) => l.startsWith(`${k}:`));
 
-    if (i >= 0) {
+    if (v === null) {
+      body = body.filter((l) => !l.startsWith(`${k}:`));
+    } else if (i >= 0) {
       body[i] = `${k}: ${v}`;
     } else {
       body.push(`${k}: ${v}`);
@@ -79,13 +82,28 @@ async function remember(vault, { text, title, type, source }, allowed) {
     }
   }
 
-  // Same title: add to the existing memory instead of making a near-duplicate.
-  const result = await writeNote(vault, rel, `\n## Update ${date}\n\n${body}\n`, "append", allowed);
+  // Same title: add to the existing memory instead of making a near-duplicate. New information makes it current
+  // again and puts it back up for review, even if it had been forgotten.
+  const note = await readNote(vault, rel);
+
+  if (note.truncated) {
+    throw new ToolError(`${note.path} is too large to update safely.`);
+  }
+
+  const current = setFrontmatter(note.content, {
+    date,
+    status: "inbox",
+    outdated_on: null,
+    outdated_reason: null,
+  });
+  const next = `${current}${current.endsWith("\n") ? "" : "\n"}\n## Update ${date}\n\n${body}\n`;
+  const result = await writeNote(vault, rel, next, "overwrite", allowed);
   return { ...result, vault: vault.id, updated: true };
 }
 
 async function forget(vault, { path, reason }, allowed) {
-  const note = await readNote(vault, path);
+  // Like the write tools, accept a path without ".md".
+  const note = await readNote(vault, /\.[^/]+$/.test(path) ? path : `${path}.md`);
 
   if (note.truncated) {
     throw new ToolError(`${note.path} is too large to update safely.`);

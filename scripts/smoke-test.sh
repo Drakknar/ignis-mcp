@@ -200,6 +200,16 @@ grep -qx 'outdated_reason: "Now drinks coffee"' "$other/$mem"
 grep -qx 'The user prefers green tea to coffee or mate.' "$other/$mem"
 call forget '{"path":"Root.md","reason":"x"}' | jq -e '.isError == true' >/dev/null
 
+echo "remember on a forgotten memory makes it current again"
+call remember '{"text":"Back to green tea.","title":"Prefers green tea","type":"preference"}' | jq -e '.structuredContent.updated == true' >/dev/null
+grep -qx 'status: inbox' "$other/$mem"
+[ "$(grep -c '^outdated_' "$other/$mem" || true)" = 0 ]
+[ "$(grep -c '^---$' "$other/$mem")" = 2 ]
+grep -qx 'Back to green tea.' "$other/$mem"
+
+echo "forget accepts a path without .md"
+call forget '{"path":"Inbox/Prefers green tea","reason":"Test"}' | jq -e '.structuredContent.status == "outdated"' >/dev/null
+
 echo "the admin token may write anywhere, except hidden paths"
 auth=$admin_token call list_vaults '{}' | jq -e '.structuredContent.writable == null' >/dev/null
 auth=$admin_token call write_note '{"vault":"Other","path":"Root.md","content":"changed by admin\n","mode":"overwrite"}' | jq -e '.isError != true' >/dev/null
