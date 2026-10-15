@@ -42,7 +42,16 @@ The token only protects the MCP endpoint. Ignis's own web UI has no login, so ke
 | `semantic_search` | Search by meaning instead of exact words, across languages. Returns notes best first, with their most relevant passages and a 0-1 score. Only offered when semantic search is on (see below) |
 | `write_note` | `create` (default, fails if the note exists), `overwrite`, `append`, or `prepend` (after the YAML frontmatter). Adds `.md` when the path has no extension and creates missing folders |
 
-The `vault` argument is optional when only one vault is enabled. Hidden folders (`.obsidian`, `.trash`, `.git`) are skipped when listing and searching, and writes to them are refused. Paths can't leave the vault, not even through symlinks. Ignis watches the vault folder, so open Obsidian tabs show changes straight away.
+The `vault` argument is optional when only one vault is enabled or `MCP_DEFAULT_VAULT` is set. Hidden folders (`.obsidian`, `.trash`, `.git`) are skipped when listing and searching, and writes to them are refused. Paths can't leave the vault, not even through symlinks. Ignis watches the vault folder, so open Obsidian tabs show changes straight away.
+
+### Several vaults
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MCP_DEFAULT_VAULT` | (none) | Vault used when a call names none and more than one vault is enabled |
+| `MCP_WRITE_PATHS` | (anywhere) | Comma-separated `Vault` or `Vault/folder` entries; `write_note` refuses everything else. E.g. `Agents/Inbox, Agents/Facts` keeps every other vault and folder read-only |
+
+`list_vaults` returns both, so a model can see where it may write.
 
 ## Semantic search
 
