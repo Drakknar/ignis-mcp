@@ -7,6 +7,7 @@ set -euo pipefail
 image=${1:?usage: smoke-test.sh <image>}
 port=18080
 embed_port=18434
+token=smoke-test-token
 base=http://localhost:$port
 work=$(mktemp -d)
 vault=$work/vaults/Test
@@ -24,6 +25,7 @@ embed_pid=$!
 docker run -d --name ignis-smoke -p $port:8080 \
   --add-host=host.docker.internal:host-gateway \
   -e MCP_EMBED_URL=http://host.docker.internal:$embed_port -e MCP_EMBED_MODEL=fake-embed \
+  -e MCP_TOKEN=$token \
   -e PUID="$(id -u)" -e PGID="$(id -g)" \
   -v "$work/vaults:/vaults" "$image" >/dev/null
 
@@ -45,9 +47,18 @@ curl -fsS -X POST "$base/api/plugins/mcp/enable" \
 
 rpc() {
   curl -fsS -X POST "$base/api/ext/mcp" \
+    -H "Authorization: Bearer $token" \
     -H 'Content-Type: application/json' \
     -H 'Accept: application/json, text/event-stream' \
     -d "$1"
+}
+
+# status [curl args...] -> prints the HTTP status of a tools/list request sent with only those headers
+status() {
+  curl -sS -o /dev/null -w '%{http_code}' -X POST "$base/api/ext/mcp" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$@"
 }
 
 # call <tool> <arguments-json> -> prints the tool result object
@@ -55,6 +66,13 @@ call() {
   rpc "$(jq -nc --arg n "$1" --argjson a "$2" \
     '{jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: $n, arguments: $a}}')" | jq '.result'
 }
+
+echo "requests without the right bearer token are refused"
+[ "$(status)" = 401 ]
+[ "$(status -H 'Authorization: Bearer wrong')" = 401 ]
+[ "$(status -H "Authorization: Basic $token")" = 401 ]
+[ "$(curl -sS -o /dev/null -w '%{http_code}' "$base/api/ext/mcp")" = 401 ]
+[ "$(status -H "Authorization: bearer $token")" = 200 ]
 
 echo "initialize"
 rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \

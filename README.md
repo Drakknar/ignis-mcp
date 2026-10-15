@@ -10,6 +10,7 @@ The image is upstream `nobbe/ignis:latest` with the plugin copied in. Nothing in
 2. Change **Repository** from `nobbe/ignis:latest` to `ghcr.io/drakknar/ignis:latest`. Leave every path and variable as it is.
 3. **Apply**.
 4. In Ignis, open Settings → **Ignis → Core plugins** and enable **MCP Server** for each vault you want to expose. Vaults you don't enable can't be reached.
+5. Optional but recommended: add the variable `MCP_TOKEN` (see [Authentication](#authentication)).
 
 ## Connect a client
 
@@ -18,12 +19,17 @@ The endpoint is `http://<unraid-ip>:<ignis-port>/api/ext/mcp` (Streamable HTTP, 
 Claude Code:
 
 ```sh
-claude mcp add --transport http ignis http://<unraid-ip>:<ignis-port>/api/ext/mcp
+claude mcp add --transport http ignis http://<unraid-ip>:<ignis-port>/api/ext/mcp \
+  --header "Authorization: Bearer <token>"
 ```
 
-Other clients: add a remote/HTTP MCP server with the same URL.
+Other clients: add a remote/HTTP MCP server with the same URL and the header `Authorization: Bearer <token>`.
 
-**No authentication.** Anyone who can reach Ignis can read and write the enabled vaults. Ignis itself has no login either, so this adds no new exposure, but keep it on the LAN.
+### Authentication
+
+Set `MCP_TOKEN` on the container to require `Authorization: Bearer <MCP_TOKEN>` on every MCP request; anything else gets `401`. Generate a long random value, e.g. `openssl rand -hex 32`. Without `MCP_TOKEN` the endpoint is open, as before, and the log says so at startup.
+
+The token only protects the MCP endpoint. Ignis's own web UI has no login, so keep the port on the LAN or behind an authenticating reverse proxy.
 
 ## Tools
 
