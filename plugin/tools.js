@@ -8,7 +8,9 @@ const {
   readNote,
   searchNotes,
   writeNote,
+  editNote,
 } = require("./vault");
+const { MEMORY_TYPES, memoryConfig, remember, forget } = require("./memory");
 const { embedConfig, noteChanged, semanticSearch } = require("./semantic");
 
 const vaultArg = z
@@ -161,6 +163,71 @@ function registerTools(server, ctx, access = { writable: writePaths() }) {
     wrap(ctx, "write_note", async ({ vault, path, content, mode }) => {
       const v = resolveVault(ctx, vault);
       const result = await writeNote(v, path, content, mode, access.writable);
+      noteChanged(ctx, v);
+      return result;
+    }),
+  );
+
+  server.registerTool(
+    "edit_note",
+    {
+      title: "Edit note",
+      description:
+        "Change one passage of a note: old_text is replaced by new_text, the rest of the note stays as it is. old_text must match exactly once, so call read_note first and copy it with enough context. Safer than write_note overwrite for small changes. Same writable paths as write_note.",
+      inputSchema: {
+        vault: vaultArg,
+        path: z.string().describe("Path inside the vault, e.g. \"Facts/Heating.md\"."),
+        old_text: z.string().min(1).describe("The exact text to replace, copied from read_note."),
+        new_text: z.string().describe("The replacement. Empty to delete the passage."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    },
+    wrap(ctx, "edit_note", async ({ vault, path, old_text, new_text }) => {
+      const v = resolveVault(ctx, vault);
+      const result = await editNote(v, path, old_text, new_text, access.writable);
+      noteChanged(ctx, v);
+      return result;
+    }),
+  );
+
+  server.registerTool(
+    "remember",
+    {
+      title: "Remember",
+      description:
+        "Save something to the shared memory when the user asks you to remember it, or states a lasting fact or preference worth keeping. Pass one self-contained memory in plain sentences; the note, its folder and frontmatter are created for you, and a memory with the same title gets an update section instead of a duplicate. Search the memory first (semantic_search) and use edit_note to correct an existing memory. Never store passwords, tokens or other secrets.",
+      inputSchema: {
+        text: z.string().min(1).describe("The memory, self-contained, e.g. \"The user prefers the heating at 20 °C in the evening.\""),
+        title: z.string().optional().describe("Short note title, e.g. \"Evening heating preference\". Defaults to the first words of text."),
+        type: z.enum(MEMORY_TYPES).default("fact").describe("fact, preference, episode (something that happened; dated) or procedure (how to do something)."),
+        source: z.string().optional().describe("Who is saving it, e.g. your model name."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    wrap(ctx, "remember", async (args) => {
+      const v = resolveVault(ctx, memoryConfig().vault);
+      const result = await remember(v, args, access.writable);
+      noteChanged(ctx, v);
+      return result;
+    }),
+  );
+
+  server.registerTool(
+    "forget",
+    {
+      title: "Forget",
+      description:
+        "Mark a memory as outdated when the user says it is wrong or no longer true. The note is kept, with status: outdated and your reason in its frontmatter, so the change can be reviewed. Use remember afterwards if there is a new version.",
+      inputSchema: {
+        vault: vaultArg.describe("Vault name. Defaults to the memory vault."),
+        path: z.string().describe("Path of the memory note, e.g. \"Inbox/Evening heating preference.md\"."),
+        reason: z.string().min(1).describe("Why it is outdated, e.g. \"User now prefers 21 °C\"."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    wrap(ctx, "forget", async ({ vault, path, reason }) => {
+      const v = resolveVault(ctx, vault || memoryConfig().vault);
+      const result = await forget(v, { path, reason }, access.writable);
       noteChanged(ctx, v);
       return result;
     }),

@@ -50,6 +50,9 @@ The token only protects the MCP endpoint. Ignis's own web UI has no login, so ke
 | `search_notes` | Case-insensitive text or regex search over file names and contents (`.md` by default). Returns path, line number and line |
 | `semantic_search` | Search by meaning instead of exact words, across languages. Returns notes best first, with their most relevant passages and a 0-1 score. Only offered when semantic search is on (see below) |
 | `write_note` | `create` (default, fails if the note exists), `overwrite`, `append`, or `prepend` (after the YAML frontmatter). Adds `.md` when the path has no extension and creates missing folders |
+| `edit_note` | Replaces one exact passage (`old_text` must occur once) and leaves the rest of the note alone |
+| `remember` | Saves a memory with consistent path and frontmatter (see [Memory](#memory)) |
+| `forget` | Marks a memory outdated, with a reason, without deleting it |
 
 The `vault` argument is optional when only one vault is enabled or `MCP_DEFAULT_VAULT` is set. Hidden folders (`.obsidian`, `.trash`, `.git`) are skipped when listing and searching, and writes to them are refused. Paths can't leave the vault, not even through symlinks. Ignis watches the vault folder, so open Obsidian tabs show changes straight away.
 
@@ -61,6 +64,28 @@ The `vault` argument is optional when only one vault is enabled or `MCP_DEFAULT_
 | `MCP_WRITE_PATHS` | (anywhere) | Comma-separated `Vault` or `Vault/folder` entries; with the agent token (or no token), `write_note` refuses everything else. The admin token ignores it. E.g. `Agents/Inbox, Agents/Facts` keeps every other vault and folder read-only |
 
 `list_vaults` returns both, so a model can see where it may write.
+
+### Memory
+
+`remember` and `forget` let a model keep memories without knowing your note conventions: it passes the text, the plugin picks the path and writes the frontmatter.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MCP_MEMORY_VAULT` | `MCP_DEFAULT_VAULT` | Vault that `remember` writes to |
+| `MCP_MEMORY_INBOX` | `Inbox` | Folder in that vault for new memories |
+
+A memory is `<inbox>/<title>.md` (episodes get the date in front) with this frontmatter:
+
+```yaml
+---
+type: preference   # fact | preference | episode | procedure
+source: "gemma"    # who saved it
+date: 2026-10-15
+status: inbox      # forget sets: outdated, plus outdated_on and outdated_reason
+---
+```
+
+Remembering again under the same title adds an `## Update <date>` section instead of a second note. `forget` keeps the note and only marks it outdated, so you can review what changed. Both obey the caller's writable paths, so the inbox must be inside `MCP_WRITE_PATHS`.
 
 ## Semantic search
 

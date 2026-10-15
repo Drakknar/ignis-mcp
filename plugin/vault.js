@@ -332,7 +332,9 @@ function insertAfterFrontmatter(existing, content) {
   return existing.slice(0, m[0].length) + content + existing.slice(m[0].length);
 }
 
-async function writeNote(vault, relPath, content, mode, allowed = writePaths()) {
+// Every write goes through here: adds ".md" when there is no extension, refuses hidden paths and anything
+// outside the caller's writable paths.
+function resolveWritable(vault, relPath, allowed) {
   if (!path.extname(String(relPath))) {
     relPath = `${relPath}.md`;
   }
@@ -349,15 +351,24 @@ async function writeNote(vault, relPath, content, mode, allowed = writePaths()) 
     );
   }
 
-  let existing = null;
+  return file;
+}
 
+async function readIfExists(abs) {
   try {
-    existing = await fs.promises.readFile(file.abs, "utf-8");
+    return await fs.promises.readFile(abs, "utf-8");
   } catch (e) {
-    if (e.code !== "ENOENT") {
-      throw e;
+    if (e.code === "ENOENT") {
+      return null;
     }
+
+    throw e;
   }
+}
+
+async function writeNote(vault, relPath, content, mode, allowed = writePaths()) {
+  const file = resolveWritable(vault, relPath, allowed);
+  const existing = await readIfExists(file.abs);
 
   if (mode === "create" && existing !== null) {
     throw new ToolError(`Note already exists: ${file.rel}`);
@@ -375,6 +386,32 @@ async function writeNote(vault, relPath, content, mode, allowed = writePaths()) 
   await fs.promises.writeFile(file.abs, next, "utf-8");
 
   return { path: file.rel, created: existing === null, bytes: Buffer.byteLength(next) };
+}
+
+// Replaces one exact passage, so a model can change a line without rewriting (and maybe losing) the rest.
+async function editNote(vault, relPath, oldText, newText, allowed = writePaths()) {
+  const file = resolveWritable(vault, relPath, allowed);
+  const existing = await readIfExists(file.abs);
+
+  if (existing === null) {
+    throw new ToolError(`Note not found: ${file.rel}`);
+  }
+
+  const count = existing.split(oldText).length - 1;
+
+  if (count === 0) {
+    throw new ToolError(`old_text not found in ${file.rel}. Call read_note and copy the passage exactly.`);
+  }
+
+  if (count > 1) {
+    throw new ToolError(`old_text appears ${count} times in ${file.rel}. Include more surrounding text so it is unique.`);
+  }
+
+  const i = existing.indexOf(oldText);
+  const next = existing.slice(0, i) + newText + existing.slice(i + oldText.length);
+  await fs.promises.writeFile(file.abs, next, "utf-8");
+
+  return { path: file.rel, replaced: 1, bytes: Buffer.byteLength(next) };
 }
 
 function normalizeExtensions(exts) {
@@ -398,4 +435,5 @@ module.exports = {
   readNote,
   searchNotes,
   writeNote,
+  editNote,
 };

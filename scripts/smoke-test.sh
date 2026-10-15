@@ -32,6 +32,7 @@ docker run -d --name ignis-smoke -p $port:8080 \
   --add-host=host.docker.internal:host-gateway \
   -e MCP_EMBED_URL=http://host.docker.internal:$embed_port -e MCP_EMBED_MODEL=fake-embed \
   -e MCP_TOKEN=$token -e MCP_ADMIN_TOKEN=$admin_token -e MCP_DEFAULT_VAULT=Test -e MCP_WRITE_PATHS="Test, Other/Inbox" \
+  -e MCP_MEMORY_VAULT=Other \
   -e PUID="$(id -u)" -e PGID="$(id -g)" \
   -v "$work/vaults:/vaults" "$image" >/dev/null
 
@@ -88,7 +89,7 @@ rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"
 
 echo "tools/list has all tools"
 rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  | jq -e '[.result.tools[].name] | sort == ["list_notes","list_vaults","read_note","search_notes","semantic_search","write_note"]' >/dev/null
+  | jq -e '[.result.tools[].name] | sort == ["edit_note","forget","list_notes","list_vaults","read_note","remember","search_notes","semantic_search","write_note"]' >/dev/null
 
 echo "list_vaults"
 call list_vaults '{}'   | jq -e '.structuredContent | (.vaults | sort) == ["Other","Test"] and .defaultVault == "Test" and .writable == ["Test","Other/Inbox"]' >/dev/null
@@ -163,6 +164,41 @@ call write_note '{"vault":"Other","path":"Inboxes/Fact","content":"x"}' | jq -e 
 call write_note '{"vault":"Other","path":"Inbox/../Sneaky","content":"x"}' | jq -e '.isError == true' >/dev/null
 grep -qx 'Read me, but do not change me.' "$other/Root.md"
 [ ! -e "$other/Inboxes" ] && [ ! -e "$other/Sneaky.md" ]
+
+echo "remember saves to the memory vault's inbox with frontmatter"
+mem='Inbox/Prefers green tea.md'
+call remember '{"text":"The user prefers green tea to coffee.","title":"Prefers green tea","type":"preference","source":"smoke"}' \
+  | jq -e --arg p "$mem" '.structuredContent | .path == $p and .vault == "Other" and .created == true' >/dev/null
+head -n 6 "$other/$mem" | grep -qx 'type: preference'
+head -n 6 "$other/$mem" | grep -qx 'status: inbox'
+head -n 6 "$other/$mem" | grep -qx 'source: "smoke"'
+
+echo "remember with the same title adds an update instead of a duplicate"
+call remember '{"text":"Also likes oolong.","title":"Prefers green tea","type":"preference"}' \
+  | jq -e '.structuredContent.updated == true' >/dev/null
+grep -q '^## Update ' "$other/$mem"
+[ "$(ls "$other/Inbox" | grep -c 'green tea')" = 1 ]
+
+echo "remember dates episodes and keeps titles inside the inbox"
+call remember '{"text":"Boiler serviced.","title":"Boiler service","type":"episode"}' \
+  | jq -e '.structuredContent.path | test("^Inbox/[0-9]{4}-[0-9]{2}-[0-9]{2} Boiler service[.]md$")' >/dev/null
+call remember '{"text":"x","title":"../../Escape"}' | jq -e '.structuredContent.path == "Inbox/Escape.md"' >/dev/null
+
+echo "edit_note replaces exactly one passage"
+call edit_note '{"vault":"Other","path":"Inbox/Prefers green tea.md","old_text":"to coffee.","new_text":"to coffee or mate."}' | jq -e '.isError != true' >/dev/null
+grep -qx 'The user prefers green tea to coffee or mate.' "$other/$mem"
+call edit_note '{"vault":"Other","path":"Inbox/Prefers green tea.md","old_text":"green tea","new_text":"x"}' | jq -e '.isError == true' >/dev/null
+call edit_note '{"vault":"Other","path":"Inbox/Prefers green tea.md","old_text":"not there","new_text":"x"}' | jq -e '.isError == true' >/dev/null
+call edit_note '{"vault":"Other","path":"Root.md","old_text":"Read me","new_text":"x"}' | jq -e '.isError == true' >/dev/null
+grep -qx 'Read me, but do not change me.' "$other/Root.md"
+
+echo "forget marks a memory outdated and keeps it"
+call forget '{"path":"Inbox/Prefers green tea.md","reason":"Now drinks coffee"}' | jq -e '.structuredContent.status == "outdated"' >/dev/null
+grep -qx 'status: outdated' "$other/$mem"
+grep -qx 'outdated_reason: "Now drinks coffee"' "$other/$mem"
+[ "$(grep -cx 'status: inbox' "$other/$mem" || true)" = 0 ]
+grep -qx 'The user prefers green tea to coffee or mate.' "$other/$mem"
+call forget '{"path":"Root.md","reason":"x"}' | jq -e '.isError == true' >/dev/null
 
 echo "the admin token may write anywhere, except hidden paths"
 auth=$admin_token call list_vaults '{}' | jq -e '.structuredContent.writable == null' >/dev/null
