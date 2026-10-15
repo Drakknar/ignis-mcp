@@ -11,18 +11,21 @@ function defaultVault(env = process.env) {
   return (env.MCP_DEFAULT_VAULT || "").trim() || null;
 }
 
-// MCP_WRITE_PATHS: comma-separated "Vault" or "Vault/folder" entries that write_note may change. Unset = anywhere.
+// MCP_WRITE_PATHS: comma-separated "Vault" or "Vault/folder" entries that agents may change; "*" = anywhere (null).
+// Unset = anywhere only while the endpoint is open; with MCP_TOKEN set it means nothing, so a lost setting fails closed.
 function writePaths(env = process.env) {
   const raw = (env.MCP_WRITE_PATHS || "").trim();
 
   if (!raw) {
-    return null;
+    return (env.MCP_TOKEN || "").trim() ? [] : null;
   }
 
-  return raw
+  const entries = raw
     .split(",")
     .map((p) => p.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, ""))
     .filter(Boolean);
+
+  return entries.includes("*") ? null : entries;
 }
 
 function isWritable(vaultId, rel, allowed = writePaths()) {
@@ -85,7 +88,18 @@ function isInside(root, target) {
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
-// Lexical check first, then the nearest existing ancestor's realpath, so symlinks can't lead outside the vault.
+function lexists(p) {
+  try {
+    fs.lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Lexical check first, then where the path really leads: the nearest existing ancestor (a symlink counts, even a
+// broken one) is resolved and the rest appended. abs/realRel are that real location, so symlinks can't lead outside
+// the vault, and writes are checked against the folder they would really land in.
 function resolveInVault(vault, relPath = "") {
   const cleaned = String(relPath).replace(/\\/g, "/").replace(/^\/+/, "");
   const target = path.resolve(vault.root, cleaned);
@@ -95,16 +109,30 @@ function resolveInVault(vault, relPath = "") {
   }
 
   let existing = target;
+  const rest = [];
 
-  while (!fs.existsSync(existing)) {
+  while (!lexists(existing)) {
+    rest.unshift(path.basename(existing));
     existing = path.dirname(existing);
   }
 
-  if (!isInside(vault.root, fs.realpathSync(existing))) {
+  let real;
+
+  try {
+    real = path.join(fs.realpathSync(existing), ...rest);
+  } catch {
+    throw new ToolError(`Path leads through a broken symlink: ${relPath}`);
+  }
+
+  if (!isInside(vault.root, real)) {
     throw new ToolError(`Path escapes the vault: ${relPath}`);
   }
 
-  return { abs: target, rel: toPosix(path.relative(vault.root, target)) };
+  return {
+    abs: real,
+    rel: toPosix(path.relative(vault.root, target)),
+    realRel: toPosix(path.relative(vault.root, real)),
+  };
 }
 
 async function* walk(dir, root) {
@@ -321,9 +349,12 @@ async function searchNotes(vault, opts) {
   return result;
 }
 
+// A note's YAML frontmatter block; group 1 is its body (undefined when the block is empty).
+const FRONTMATTER = /^---\r?\n(?:([\s\S]*?)\r?\n)?---(?:\r?\n|$)/;
+
 // Inserting at the very top would break a note's YAML frontmatter, so prepend goes right after it.
 function insertAfterFrontmatter(existing, content) {
-  const m = existing.match(/^---\r?\n[\s\S]*?\r?\n---(\r?\n|$)/);
+  const m = existing.match(FRONTMATTER);
 
   if (!m) {
     return content + existing;
@@ -332,26 +363,52 @@ function insertAfterFrontmatter(existing, content) {
   return existing.slice(0, m[0].length) + content + existing.slice(m[0].length);
 }
 
+// "Inbox/Idea" and "Inbox/Idea." -> "Inbox/Idea.md"; "Inbox/v1.2 notes" -> "Inbox/v1.2 notes.md"; "x.canvas" stays.
+function notePath(relPath) {
+  const p = String(relPath).replace(/\\/g, "/").replace(/[.\s]+$/, "");
+  return /\.[A-Za-z0-9]{1,10}$/.test(p.split("/").pop()) ? p : `${p}.md`;
+}
+
 // Every write goes through here: adds ".md" when there is no extension, refuses hidden paths and anything
-// outside the caller's writable paths.
+// outside the caller's writable paths, checking both the path as given and where it really leads.
 function resolveWritable(vault, relPath, allowed) {
-  if (!path.extname(String(relPath))) {
-    relPath = `${relPath}.md`;
-  }
+  const file = resolveInVault(vault, notePath(relPath));
 
-  const file = resolveInVault(vault, relPath);
+  for (const rel of [file.rel, file.realRel]) {
+    if (!rel || isHiddenPath(rel)) {
+      throw new ToolError(`Refusing to write to hidden or config path: ${file.rel || "/"}`);
+    }
 
-  if (!file.rel || isHiddenPath(file.rel)) {
-    throw new ToolError(`Refusing to write to hidden or config path: ${file.rel || "/"}`);
-  }
-
-  if (!isWritable(vault.id, file.rel, allowed)) {
-    throw new ToolError(
-      `Writing to ${vault.id}/${file.rel} is not allowed. Writable: ${allowed.join(", ")}`,
-    );
+    if (!isWritable(vault.id, rel, allowed)) {
+      throw new ToolError(
+        `Writing to ${vault.id}/${file.rel} is not allowed. Writable: ${allowed.join(", ") || "(nothing)"}`,
+      );
+    }
   }
 
   return file;
+}
+
+// Per-file queue: read-modify-write calls on the same note run one after another, so none loses another's change.
+const locks = new Map();
+
+async function withLock(key, fn) {
+  const prev = locks.get(key) || Promise.resolve();
+  let release;
+  const mine = new Promise((resolve) => (release = resolve));
+  const tail = prev.then(() => mine);
+  locks.set(key, tail);
+  await prev;
+
+  try {
+    return await fn();
+  } finally {
+    release();
+
+    if (locks.get(key) === tail) {
+      locks.delete(key);
+    }
+  }
 }
 
 async function readIfExists(abs) {
@@ -366,52 +423,79 @@ async function readIfExists(abs) {
   }
 }
 
-async function writeNote(vault, relPath, content, mode, allowed = writePaths()) {
+// The one way notes are changed: checks the path, then, under the note's lock, reads it (null = missing), lets
+// change(existing) return the new text and writes it. A new note is created exclusively, never over a file that
+// appeared in the meantime.
+async function updateNote(vault, relPath, allowed, change) {
   const file = resolveWritable(vault, relPath, allowed);
-  const existing = await readIfExists(file.abs);
 
-  if (mode === "create" && existing !== null) {
-    throw new ToolError(`Note already exists: ${file.rel}`);
-  }
+  return withLock(file.abs, async () => {
+    try {
+      const existing = await readIfExists(file.abs);
+      const next = await change(existing, file);
 
-  let next = content;
+      await fs.promises.mkdir(path.dirname(file.abs), { recursive: true });
+      await fs.promises.writeFile(file.abs, next, { encoding: "utf-8", flag: existing === null ? "wx" : "w" });
 
-  if (existing !== null && mode === "append") {
-    next = existing + (existing === "" || existing.endsWith("\n") ? "" : "\n") + content;
-  } else if (existing !== null && mode === "prepend") {
-    next = insertAfterFrontmatter(existing, content.endsWith("\n") ? content : `${content}\n`);
-  }
+      return { path: file.rel, created: existing === null, bytes: Buffer.byteLength(next) };
+    } catch (e) {
+      if (e.code === "EEXIST") {
+        throw new ToolError(`Note already exists: ${file.rel}`);
+      }
 
-  await fs.promises.mkdir(path.dirname(file.abs), { recursive: true });
-  await fs.promises.writeFile(file.abs, next, "utf-8");
+      if (e.code === "EISDIR" || e.code === "ENOTDIR") {
+        throw new ToolError(`Not a note: ${file.rel}`);
+      }
 
-  return { path: file.rel, created: existing === null, bytes: Buffer.byteLength(next) };
+      throw e;
+    }
+  });
+}
+
+async function writeNote(vault, relPath, content, mode, allowed = writePaths()) {
+  return updateNote(vault, relPath, allowed, (existing, file) => {
+    if (existing === null) {
+      return content;
+    }
+
+    if (mode === "create") {
+      throw new ToolError(`Note already exists: ${file.rel}`);
+    }
+
+    if (mode === "append") {
+      return existing + (existing === "" || existing.endsWith("\n") ? "" : "\n") + content;
+    }
+
+    if (mode === "prepend") {
+      return insertAfterFrontmatter(existing, content.endsWith("\n") ? content : `${content}\n`);
+    }
+
+    return content;
+  });
 }
 
 // Replaces one exact passage, so a model can change a line without rewriting (and maybe losing) the rest.
 async function editNote(vault, relPath, oldText, newText, allowed = writePaths()) {
-  const file = resolveWritable(vault, relPath, allowed);
-  const existing = await readIfExists(file.abs);
+  const result = await updateNote(vault, relPath, allowed, (existing, file) => {
+    if (existing === null) {
+      throw new ToolError(`Note not found: ${file.rel}`);
+    }
 
-  if (existing === null) {
-    throw new ToolError(`Note not found: ${file.rel}`);
-  }
+    const count = existing.split(oldText).length - 1;
 
-  const count = existing.split(oldText).length - 1;
+    if (count === 0) {
+      throw new ToolError(`old_text not found in ${file.rel}. Call read_note and copy the passage exactly.`);
+    }
 
-  if (count === 0) {
-    throw new ToolError(`old_text not found in ${file.rel}. Call read_note and copy the passage exactly.`);
-  }
+    if (count > 1) {
+      throw new ToolError(`old_text appears ${count} times in ${file.rel}. Include more surrounding text so it is unique.`);
+    }
 
-  if (count > 1) {
-    throw new ToolError(`old_text appears ${count} times in ${file.rel}. Include more surrounding text so it is unique.`);
-  }
+    const i = existing.indexOf(oldText);
+    return existing.slice(0, i) + newText + existing.slice(i + oldText.length);
+  });
 
-  const i = existing.indexOf(oldText);
-  const next = existing.slice(0, i) + newText + existing.slice(i + oldText.length);
-  await fs.promises.writeFile(file.abs, next, "utf-8");
-
-  return { path: file.rel, replaced: 1, bytes: Buffer.byteLength(next) };
+  return { path: result.path, replaced: 1, bytes: result.bytes };
 }
 
 function normalizeExtensions(exts) {
@@ -424,6 +508,7 @@ function normalizeExtensions(exts) {
 
 module.exports = {
   MAX_SEARCH_FILE_BYTES,
+  FRONTMATTER,
   ToolError,
   defaultVault,
   writePaths,
@@ -433,6 +518,7 @@ module.exports = {
   listNotes,
   readNote,
   searchNotes,
+  updateNote,
   writeNote,
   editNote,
 };
