@@ -8,6 +8,7 @@ image=${1:?usage: smoke-test.sh <image>}
 port=18080
 embed_port=18434
 token=smoke-test-token
+admin_token=smoke-admin-token
 base=http://localhost:$port
 work=$(mktemp -d)
 vault=$work/vaults/Test
@@ -30,7 +31,7 @@ embed_pid=$!
 docker run -d --name ignis-smoke -p $port:8080 \
   --add-host=host.docker.internal:host-gateway \
   -e MCP_EMBED_URL=http://host.docker.internal:$embed_port -e MCP_EMBED_MODEL=fake-embed \
-  -e MCP_TOKEN=$token -e MCP_DEFAULT_VAULT=Test -e MCP_WRITE_PATHS="Test, Other/Inbox" \
+  -e MCP_TOKEN=$token -e MCP_ADMIN_TOKEN=$admin_token -e MCP_DEFAULT_VAULT=Test -e MCP_WRITE_PATHS="Test, Other/Inbox" \
   -e PUID="$(id -u)" -e PGID="$(id -g)" \
   -v "$work/vaults:/vaults" "$image" >/dev/null
 
@@ -54,7 +55,7 @@ done
 
 rpc() {
   curl -fsS -X POST "$base/api/ext/mcp" \
-    -H "Authorization: Bearer $token" \
+    -H "Authorization: Bearer ${auth:-$token}" \
     -H 'Content-Type: application/json' \
     -H 'Accept: application/json, text/event-stream' \
     -d "$1"
@@ -162,5 +163,12 @@ call write_note '{"vault":"Other","path":"Inboxes/Fact","content":"x"}' | jq -e 
 call write_note '{"vault":"Other","path":"Inbox/../Sneaky","content":"x"}' | jq -e '.isError == true' >/dev/null
 grep -qx 'Read me, but do not change me.' "$other/Root.md"
 [ ! -e "$other/Inboxes" ] && [ ! -e "$other/Sneaky.md" ]
+
+echo "the admin token may write anywhere, except hidden paths"
+auth=$admin_token call list_vaults '{}' | jq -e '.structuredContent.writable == null' >/dev/null
+auth=$admin_token call write_note '{"vault":"Other","path":"Root.md","content":"changed by admin\n","mode":"overwrite"}' | jq -e '.isError != true' >/dev/null
+grep -qx 'changed by admin' "$other/Root.md"
+auth=$admin_token call write_note '{"vault":"Other","path":".obsidian/evil.json","content":"{}","mode":"overwrite"}' | jq -e '.isError == true' >/dev/null
+[ "$(status -H "Authorization: Bearer $admin_token")" = 200 ]
 
 echo "All smoke tests passed"

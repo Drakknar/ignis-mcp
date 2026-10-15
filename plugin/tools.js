@@ -48,7 +48,8 @@ function wrap(ctx, name, fn) {
   };
 }
 
-function registerTools(server, ctx) {
+// access.writable: where this caller may write (null = anywhere), decided by its token in index.js.
+function registerTools(server, ctx, access = { writable: writePaths() }) {
   server.registerTool(
     "list_vaults",
     {
@@ -60,7 +61,7 @@ function registerTools(server, ctx) {
     wrap(ctx, "list_vaults", async () => ({
       vaults: ctx.getEnabledVaults(),
       defaultVault: defaultVault(),
-      writable: writePaths(),
+      writable: access.writable,
     })),
   );
 
@@ -159,7 +160,7 @@ function registerTools(server, ctx) {
     },
     wrap(ctx, "write_note", async ({ vault, path, content, mode }) => {
       const v = resolveVault(ctx, vault);
-      const result = await writeNote(v, path, content, mode);
+      const result = await writeNote(v, path, content, mode, access.writable);
       noteChanged(ctx, v);
       return result;
     }),
