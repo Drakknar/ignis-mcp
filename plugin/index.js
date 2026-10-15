@@ -4,23 +4,30 @@ const {
   StreamableHTTPServerTransport,
 } = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const { registerTools } = require("./tools");
-const { resolveVault } = require("./vault");
+const { resolveVault, writePaths } = require("./vault");
 const semantic = require("./semantic");
 
-const SERVER_INFO = { name: "ignis-vaults", version: "0.4.0" };
+const SERVER_INFO = { name: "ignis-vaults", version: "0.5.0" };
 
 function sha256(s) {
   return crypto.createHash("sha256").update(s).digest();
 }
 
-// Compare digests so the check takes the same time whatever the length or content of the presented token.
-function requireBearer(token) {
-  const expected = sha256(token);
+// tokens: { role: token }. The matching role is stored on req.mcpRole. The presented token's digest is compared
+// with every configured one, so the check takes the same time whatever the length or content of the token.
+function requireBearer(tokens) {
+  const known = Object.entries(tokens)
+    .filter(([, t]) => t)
+    .map(([role, t]) => [role, sha256(t)]);
 
   return (req, res, next) => {
     const m = /^Bearer\s+(.+)$/i.exec(req.get("authorization") || "");
+    const presented = m ? sha256(m[1].trim()) : null;
+    const matches = presented ? known.filter(([, d]) => crypto.timingSafeEqual(presented, d)) : [];
 
-    if (m && crypto.timingSafeEqual(sha256(m[1].trim()), expected)) {
+    if (matches.length > 0) {
+      // A token set as both MCP_TOKEN and MCP_ADMIN_TOKEN gets the narrower agent access.
+      req.mcpRole = matches.some(([role]) => role === "agent") ? "agent" : "admin";
       return next();
     }
 
@@ -36,7 +43,7 @@ module.exports = {
   id: "mcp",
   name: "MCP Server",
   description:
-    "Expose enabled vaults to AI clients over MCP at /api/ext/mcp (bearer token when MCP_TOKEN is set)",
+    "Expose enabled vaults to AI clients over MCP at /api/ext/mcp (bearer tokens when MCP_TOKEN / MCP_ADMIN_TOKEN are set)",
   version: SERVER_INFO.version,
 
   _ctx: null,
@@ -44,10 +51,12 @@ module.exports = {
   async register(ctx) {
     this._ctx = ctx;
 
-    const token = process.env.MCP_TOKEN || "";
+    // MCP_TOKEN = agents, limited by MCP_WRITE_PATHS; MCP_ADMIN_TOKEN = write anywhere. Neither set = open, agent limits.
+    const tokens = { agent: process.env.MCP_TOKEN || "", admin: process.env.MCP_ADMIN_TOKEN || "" };
+    const auth = Boolean(tokens.agent || tokens.admin);
 
-    if (token) {
-      ctx.router.use(requireBearer(token));
+    if (auth) {
+      ctx.router.use(requireBearer(tokens));
     }
 
     // Stateless Streamable HTTP: a fresh server + transport per request, so there is no session state to leak or expire.
@@ -64,7 +73,7 @@ module.exports = {
       });
 
       try {
-        registerTools(server, ctx);
+        registerTools(server, ctx, { writable: req.mcpRole === "admin" ? null : writePaths() });
         await server.connect(transport);
         await transport.handleRequest(req, res, req.body);
       } catch (e) {
@@ -93,7 +102,9 @@ module.exports = {
 
     ctx.log(
       `MCP endpoint ready at /api/ext/${this.id}` +
-        (token ? " (bearer token required)" : " (no auth: set MCP_TOKEN to require a bearer token)"),
+        (auth
+          ? ` (bearer token required: ${[tokens.agent && "agent", tokens.admin && "admin"].filter(Boolean).join(" + ")})`
+          : " (no auth: set MCP_TOKEN to require a bearer token)"),
     );
 
     const embed = semantic.embedConfig();

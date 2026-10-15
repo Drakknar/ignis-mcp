@@ -27,7 +27,16 @@ Other clients: add a remote/HTTP MCP server with the same URL and the header `Au
 
 ### Authentication
 
-Set `MCP_TOKEN` on the container to require `Authorization: Bearer <MCP_TOKEN>` on every MCP request; anything else gets `401`. Generate a long random value, e.g. `openssl rand -hex 32`. Without `MCP_TOKEN` the endpoint is open, as before, and the log says so at startup.
+Set `MCP_TOKEN` on the container to require `Authorization: Bearer <MCP_TOKEN>` on every MCP request; anything else gets `401`. Generate a long random value, e.g. `openssl rand -hex 32`. Without a token the endpoint is open, as before, and the log says so at startup.
+
+Two tokens give two levels of access to the same tools:
+
+| Token | Writes |
+|---|---|
+| `MCP_TOKEN` (agents) | Only inside `MCP_WRITE_PATHS` (anywhere when that is unset) |
+| `MCP_ADMIN_TOKEN` (you) | Anywhere in every enabled vault, including vaults enabled later |
+
+Both read every enabled vault, and hidden paths stay off limits for both. Give AI models the agent token and keep the admin token for clients that act for you, e.g. a separate MCP connection you switch on only when you want a model to edit your notes. Setting only `MCP_ADMIN_TOKEN` also turns authentication on.
 
 The token only protects the MCP endpoint. Ignis's own web UI has no login, so keep the port on the LAN or behind an authenticating reverse proxy.
 
@@ -49,7 +58,7 @@ The `vault` argument is optional when only one vault is enabled or `MCP_DEFAULT_
 | Variable | Default | Meaning |
 |---|---|---|
 | `MCP_DEFAULT_VAULT` | (none) | Vault used when a call names none and more than one vault is enabled |
-| `MCP_WRITE_PATHS` | (anywhere) | Comma-separated `Vault` or `Vault/folder` entries; `write_note` refuses everything else. E.g. `Agents/Inbox, Agents/Facts` keeps every other vault and folder read-only |
+| `MCP_WRITE_PATHS` | (anywhere) | Comma-separated `Vault` or `Vault/folder` entries; with the agent token (or no token), `write_note` refuses everything else. The admin token ignores it. E.g. `Agents/Inbox, Agents/Facts` keeps every other vault and folder read-only |
 
 `list_vaults` returns both, so a model can see where it may write.
 

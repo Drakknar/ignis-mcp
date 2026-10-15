@@ -332,7 +332,7 @@ function insertAfterFrontmatter(existing, content) {
   return existing.slice(0, m[0].length) + content + existing.slice(m[0].length);
 }
 
-async function writeNote(vault, relPath, content, mode) {
+async function writeNote(vault, relPath, content, mode, allowed = writePaths()) {
   if (!path.extname(String(relPath))) {
     relPath = `${relPath}.md`;
   }
@@ -343,9 +343,9 @@ async function writeNote(vault, relPath, content, mode) {
     throw new ToolError(`Refusing to write to hidden or config path: ${file.rel || "/"}`);
   }
 
-  if (!isWritable(vault.id, file.rel)) {
+  if (!isWritable(vault.id, file.rel, allowed)) {
     throw new ToolError(
-      `Writing to ${vault.id}/${file.rel} is not allowed. Writable: ${writePaths().join(", ")}`,
+      `Writing to ${vault.id}/${file.rel} is not allowed. Writable: ${allowed.join(", ")}`,
     );
   }
 
