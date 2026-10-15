@@ -6,13 +6,48 @@ const MAX_SEARCH_FILE_BYTES = 2 * 1024 * 1024;
 
 class ToolError extends Error {}
 
+// MCP_DEFAULT_VAULT: used when a tool call names no vault and more than one is enabled.
+function defaultVault(env = process.env) {
+  return (env.MCP_DEFAULT_VAULT || "").trim() || null;
+}
+
+// MCP_WRITE_PATHS: comma-separated "Vault" or "Vault/folder" entries that write_note may change. Unset = anywhere.
+function writePaths(env = process.env) {
+  const raw = (env.MCP_WRITE_PATHS || "").trim();
+
+  if (!raw) {
+    return null;
+  }
+
+  return raw
+    .split(",")
+    .map((p) => p.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, ""))
+    .filter(Boolean);
+}
+
+function isWritable(vaultId, rel, allowed = writePaths()) {
+  if (!allowed) {
+    return true;
+  }
+
+  return allowed.some((entry) => {
+    const [v, ...rest] = entry.split("/");
+    const folder = rest.join("/");
+    return v === vaultId && (!folder || rel === folder || rel.startsWith(`${folder}/`));
+  });
+}
+
 // Only vaults the user enabled for this plugin in Ignis -> Core plugins are reachable.
 function resolveVault(ctx, vaultId) {
   const enabled = ctx.getEnabledVaults();
 
   if (!vaultId) {
+    const fallback = defaultVault();
+
     if (enabled.length === 1) {
       vaultId = enabled[0];
+    } else if (fallback && enabled.includes(fallback)) {
+      vaultId = fallback;
     } else {
       throw new ToolError(
         `Specify a vault. Available: ${enabled.join(", ") || "(none enabled)"}`,
@@ -308,6 +343,12 @@ async function writeNote(vault, relPath, content, mode) {
     throw new ToolError(`Refusing to write to hidden or config path: ${file.rel || "/"}`);
   }
 
+  if (!isWritable(vault.id, file.rel)) {
+    throw new ToolError(
+      `Writing to ${vault.id}/${file.rel} is not allowed. Writable: ${writePaths().join(", ")}`,
+    );
+  }
+
   let existing = null;
 
   try {
@@ -347,6 +388,9 @@ function normalizeExtensions(exts) {
 module.exports = {
   MAX_SEARCH_FILE_BYTES,
   ToolError,
+  defaultVault,
+  writePaths,
+  isWritable,
   resolveVault,
   resolveInVault,
   walk,

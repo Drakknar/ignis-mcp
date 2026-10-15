@@ -1,6 +1,8 @@
 const { z } = require("zod");
 const {
   ToolError,
+  defaultVault,
+  writePaths,
   resolveVault,
   listNotes,
   readNote,
@@ -12,7 +14,7 @@ const { embedConfig, noteChanged, semanticSearch } = require("./semantic");
 const vaultArg = z
   .string()
   .optional()
-  .describe("Vault name. Optional when only one vault is enabled for MCP.");
+  .describe("Vault name. Optional when only one vault is enabled or a default vault is set (see list_vaults).");
 
 const folderArg = z
   .string()
@@ -51,10 +53,15 @@ function registerTools(server, ctx) {
     "list_vaults",
     {
       title: "List vaults",
-      description: "List the Obsidian vaults exposed over MCP.",
+      description:
+        "List the Obsidian vaults exposed over MCP, the default vault used when a call names none, and where write_note may write (null = anywhere).",
       annotations: { readOnlyHint: true },
     },
-    wrap(ctx, "list_vaults", async () => ({ vaults: ctx.getEnabledVaults() })),
+    wrap(ctx, "list_vaults", async () => ({
+      vaults: ctx.getEnabledVaults(),
+      defaultVault: defaultVault(),
+      writable: writePaths(),
+    })),
   );
 
   server.registerTool(
@@ -141,7 +148,7 @@ function registerTools(server, ctx) {
     {
       title: "Write note",
       description:
-        "Create or change a note. Missing folders are created and \".md\" is added when the path has no extension. Modes: create (fails if it exists), overwrite, append (to the end), prepend (after the YAML frontmatter). Hidden paths such as .obsidian are refused. Open Obsidian tabs pick up the change.",
+        "Create or change a note. Missing folders are created and \".md\" is added when the path has no extension. Modes: create (fails if it exists), overwrite, append (to the end), prepend (after the YAML frontmatter). Hidden paths such as .obsidian are refused, and so is anything outside the writable paths listed by list_vaults. Open Obsidian tabs pick up the change.",
       inputSchema: {
         vault: vaultArg,
         path: z.string().describe("Path inside the vault, e.g. \"Inbox/Idea.md\"."),

@@ -18,6 +18,11 @@ printf 'Nothing to see.\n' > "$vault/Projects/Plan.md"
 printf '{"needle": "hidden config must not be searched"}\n' > "$vault/.obsidian/app.json"
 printf '# Heating\nThe yearly boiler inspection was on 3 March.\n' > "$vault/Projects/House.md"
 
+# A second vault where only Inbox/ is writable (MCP_WRITE_PATHS below).
+other=$work/vaults/Other
+mkdir -p "$other/.obsidian" "$other/Inbox"
+printf 'Read me, but do not change me.\n' > "$other/Root.md"
+
 # Stand-in for Ollama's embedding API, reached from the container through the host gateway.
 node "$(dirname "$0")/fake-embed.js" $embed_port &
 embed_pid=$!
@@ -25,7 +30,7 @@ embed_pid=$!
 docker run -d --name ignis-smoke -p $port:8080 \
   --add-host=host.docker.internal:host-gateway \
   -e MCP_EMBED_URL=http://host.docker.internal:$embed_port -e MCP_EMBED_MODEL=fake-embed \
-  -e MCP_TOKEN=$token \
+  -e MCP_TOKEN=$token -e MCP_DEFAULT_VAULT=Test -e MCP_WRITE_PATHS="Test, Other/Inbox" \
   -e PUID="$(id -u)" -e PGID="$(id -g)" \
   -v "$work/vaults:/vaults" "$image" >/dev/null
 
@@ -41,9 +46,11 @@ for _ in $(seq 120); do
 done
 curl -fsS "$base/api/plugins" | jq -e 'any(.[]; .id == "mcp")' >/dev/null
 
-echo "Enabling the plugin for the test vault"
-curl -fsS -X POST "$base/api/plugins/mcp/enable" \
-  -H 'Content-Type: application/json' -d '{"vault":"Test"}' | jq -e '.ok' >/dev/null
+echo "Enabling the plugin for the test vaults"
+for v in Test Other; do
+  curl -fsS -X POST "$base/api/plugins/mcp/enable" \
+    -H 'Content-Type: application/json' -d "{\"vault\":\"$v\"}" | jq -e '.ok' >/dev/null
+done
 
 rpc() {
   curl -fsS -X POST "$base/api/ext/mcp" \
@@ -83,7 +90,7 @@ rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
   | jq -e '[.result.tools[].name] | sort == ["list_notes","list_vaults","read_note","search_notes","semantic_search","write_note"]' >/dev/null
 
 echo "list_vaults"
-call list_vaults '{}' | jq -e '.structuredContent.vaults == ["Test"]' >/dev/null
+call list_vaults '{}'   | jq -e '.structuredContent | (.vaults | sort) == ["Other","Test"] and .defaultVault == "Test" and .writable == ["Test","Other/Inbox"]' >/dev/null
 
 echo "list_notes skips hidden folders"
 call list_notes '{}' | jq -e '[.structuredContent.notes[].path] == ["Projects/House.md","Projects/Plan.md","Welcome.md"]' >/dev/null
@@ -142,5 +149,19 @@ call write_note '{"path":".obsidian/evil.json","content":"{}","mode":"overwrite"
 
 echo "unknown vault is refused"
 call list_notes '{"vault":"Nope"}' | jq -e '.isError == true' >/dev/null
+
+echo "calls without a vault use the default vault"
+call read_note '{"path":"Root.md"}' | jq -e '.isError == true' >/dev/null
+call read_note '{"vault":"Other","path":"Root.md"}' | jq -e '.structuredContent.content | contains("Read me")' >/dev/null
+
+echo "write_note only writes inside MCP_WRITE_PATHS"
+call write_note '{"vault":"Other","path":"Inbox/Fact","content":"ok
+"}' | jq -e '.isError != true' >/dev/null
+grep -qx 'ok' "$other/Inbox/Fact.md"
+call write_note '{"vault":"Other","path":"Root.md","content":"x","mode":"overwrite"}' | jq -e '.isError == true' >/dev/null
+call write_note '{"vault":"Other","path":"Inboxes/Fact","content":"x"}' | jq -e '.isError == true' >/dev/null
+call write_note '{"vault":"Other","path":"Inbox/../Sneaky","content":"x"}' | jq -e '.isError == true' >/dev/null
+grep -qx 'Read me, but do not change me.' "$other/Root.md"
+[ ! -e "$other/Inboxes" ] && [ ! -e "$other/Sneaky.md" ]
 
 echo "All smoke tests passed"

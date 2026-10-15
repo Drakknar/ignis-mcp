@@ -7,7 +7,7 @@ const { registerTools } = require("./tools");
 const { resolveVault } = require("./vault");
 const semantic = require("./semantic");
 
-const SERVER_INFO = { name: "ignis-vaults", version: "0.3.0" };
+const SERVER_INFO = { name: "ignis-vaults", version: "0.4.0" };
 
 function sha256(s) {
   return crypto.createHash("sha256").update(s).digest();
