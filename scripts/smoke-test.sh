@@ -9,6 +9,7 @@ port=18080
 embed_port=18434
 token=smoke-test-token
 admin_token=smoke-admin-token
+read_token=smoke-read-token
 base=http://localhost:$port
 work=$(mktemp -d)
 vault=$work/vaults/Test
@@ -23,6 +24,11 @@ printf '# Heating\nThe yearly boiler inspection was on 3 March.\n' > "$vault/Pro
 other=$work/vaults/Other
 mkdir -p "$other/.obsidian" "$other/Inbox"
 printf 'Read me, but do not change me.\n' > "$other/Root.md"
+# Symlinks in the writable folder that lead elsewhere: to a read-only note, to a read-only folder, and nowhere (outside).
+ln -s ../Root.md "$other/Inbox/Link to root.md"
+mkdir -p "$other/Notes" && printf 'Not writable.\n' > "$other/Notes/Kept.md"
+ln -s ../Notes "$other/Inbox/notes"
+ln -s /tmp/ignis-smoke-escape.md "$other/Inbox/Dangling.md"
 
 # Stand-in for Ollama's embedding API, reached from the container through the host gateway.
 node "$(dirname "$0")/fake-embed.js" $embed_port &
@@ -31,7 +37,7 @@ embed_pid=$!
 docker run -d --name ignis-smoke -p $port:8080 \
   --add-host=host.docker.internal:host-gateway \
   -e MCP_EMBED_URL=http://host.docker.internal:$embed_port -e MCP_EMBED_MODEL=fake-embed \
-  -e MCP_TOKEN=$token -e MCP_ADMIN_TOKEN=$admin_token -e MCP_DEFAULT_VAULT=Test -e MCP_WRITE_PATHS="Test, Other/Inbox" \
+  -e MCP_TOKEN=$token -e MCP_ADMIN_TOKEN=$admin_token -e MCP_READ_TOKEN=$read_token -e MCP_DEFAULT_VAULT=Test -e MCP_WRITE_PATHS="Test, Other/Inbox" \
   -e MCP_MEMORY_VAULT=Other \
   -e PUID="$(id -u)" -e PGID="$(id -g)" \
   -v "$work/vaults:/vaults" "$image" >/dev/null
@@ -216,5 +222,55 @@ auth=$admin_token call write_note '{"vault":"Other","path":"Root.md","content":"
 grep -qx 'changed by admin' "$other/Root.md"
 auth=$admin_token call write_note '{"vault":"Other","path":".obsidian/evil.json","content":"{}","mode":"overwrite"}' | jq -e '.isError == true' >/dev/null
 [ "$(status -H "Authorization: Bearer $admin_token")" = 200 ]
+
+echo "an agent call after an admin call is restricted again"
+call list_vaults '{}' | jq -e '.structuredContent.writable == ["Test","Other/Inbox"]' >/dev/null
+call write_note '{"vault":"Other","path":"Root.md","content":"x","mode":"overwrite"}' | jq -e '.isError == true' >/dev/null
+
+echo "paths can't escape the writable folders in other spellings"
+for p in 'Inbox\..\Root' '/Other/Root' 'Inbox/./../Root.md' 'Inbox/..'; do
+  call write_note "$(jq -nc --arg p "$p" '{vault:"Other",path:$p,content:"x",mode:"overwrite"}')" | jq -e '.isError == true' >/dev/null
+done
+call edit_note '{"vault":"Other","path":"Inbox/../Root","old_text":"changed","new_text":"x"}' | jq -e '.isError == true' >/dev/null
+call forget '{"vault":"Other","path":"Inbox/../Root","reason":"x"}' | jq -e '.isError == true' >/dev/null
+call forget '{"vault":"Other","path":"Root","reason":"x"}' | jq -e '.isError == true' >/dev/null
+grep -qx 'changed by admin' "$other/Root.md"
+
+echo "symlinks can't lead writes out of the writable folders"
+call write_note '{"vault":"Other","path":"Inbox/Link to root.md","content":"x","mode":"overwrite"}' | jq -e '.isError == true' >/dev/null
+call edit_note '{"vault":"Other","path":"Inbox/Link to root.md","old_text":"changed","new_text":"x"}' | jq -e '.isError == true' >/dev/null
+call write_note '{"vault":"Other","path":"Inbox/notes/Kept.md","content":"x","mode":"overwrite"}' | jq -e '.isError == true' >/dev/null
+call write_note '{"vault":"Other","path":"Inbox/notes/New","content":"x"}' | jq -e '.isError == true' >/dev/null
+call write_note '{"vault":"Other","path":"Inbox/Dangling.md","content":"x"}' | jq -e '.isError == true' >/dev/null
+grep -qx 'changed by admin' "$other/Root.md"
+[ ! -e "$other/Notes/New.md" ] && grep -qx 'Not writable.' "$other/Notes/Kept.md"
+! docker exec ignis-smoke test -e /tmp/ignis-smoke-escape.md
+
+echo "unexpected errors don't reveal server paths"
+mkdir -p "$other/Inbox/Folder.md"
+call write_note '{"vault":"Other","path":"Inbox/Folder.md","content":"x","mode":"overwrite"}' | jq -e '.isError == true and (.content[0].text | contains("/vaults") | not)' >/dev/null
+call write_note "$(jq -nc '{vault:"Other",path:"Inbox/nul\u0000byte",content:"x"}')" | jq -e '.isError == true and (.content[0].text | contains("/vaults") | not)' >/dev/null
+
+echo "concurrent appends to one note all land"
+for i in $(seq 10); do
+  call write_note "$(jq -nc --arg c "line $i" '{vault:"Other",path:"Inbox/Log",content:($c + "\n"),mode:"append"}')" >/dev/null &
+done
+wait
+[ "$(grep -c '^line ' "$other/Inbox/Log.md")" = 10 ]
+
+echo "the read token gets only the read tools"
+auth=$read_token rpc '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+  | jq -e '[.result.tools[].name] | sort == ["list_notes","list_vaults","read_note","search_notes","semantic_search"]' >/dev/null
+auth=$read_token call list_vaults '{}' | jq -e '.structuredContent.writable == []' >/dev/null
+auth=$read_token call read_note '{"vault":"Other","path":"Root.md"}' | jq -e '.structuredContent.content | contains("changed by admin")' >/dev/null
+auth=$read_token rpc "$(jq -nc '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"write_note",arguments:{vault:"Other",path:"Inbox/R",content:"x"}}}')" \
+  | jq -e '.error != null or .result.isError == true' >/dev/null
+[ ! -e "$other/Inbox/R.md" ]
+
+echo "the frontmatter stays one clean block"
+printf -- '---\nstatus: inbox\nnote: |\n  two\n  lines\nstatus: inbox\n---\n# Dup\n' > "$other/Inbox/Dup.md"
+call forget '{"vault":"Other","path":"Inbox/Dup","reason":"x"}' | jq -e '.isError != true' >/dev/null
+[ "$(grep -c '^status:' "$other/Inbox/Dup.md")" = 1 ]
+grep -qx 'status: outdated' "$other/Inbox/Dup.md"
 
 echo "All smoke tests passed"

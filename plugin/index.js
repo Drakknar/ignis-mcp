@@ -7,11 +7,14 @@ const { registerTools } = require("./tools");
 const { resolveVault, writePaths } = require("./vault");
 const semantic = require("./semantic");
 
-const SERVER_INFO = { name: "ignis-vaults", version: "0.6.1" };
+const SERVER_INFO = { name: "ignis-vaults", version: "0.7.0" };
 
 function sha256(s) {
   return crypto.createHash("sha256").update(s).digest();
 }
+
+// Narrowest first.
+const ROLES = ["reader", "agent", "admin"];
 
 // tokens: { role: token }. The matching role is stored on req.mcpRole. The presented token's digest is compared
 // with every configured one, so the check takes the same time whatever the length or content of the token.
@@ -26,8 +29,8 @@ function requireBearer(tokens) {
     const matches = presented ? known.filter(([, d]) => crypto.timingSafeEqual(presented, d)) : [];
 
     if (matches.length > 0) {
-      // A token set as both MCP_TOKEN and MCP_ADMIN_TOKEN gets the narrower agent access.
-      req.mcpRole = matches.some(([role]) => role === "agent") ? "agent" : "admin";
+      // A token set for several roles gets the narrowest of them.
+      req.mcpRole = ROLES.find((r) => matches.some(([role]) => role === r));
       return next();
     }
 
@@ -51,13 +54,15 @@ module.exports = {
   async register(ctx) {
     this._ctx = ctx;
 
-    // MCP_TOKEN = agents, limited by MCP_WRITE_PATHS; MCP_ADMIN_TOKEN = write anywhere. Neither set = open, agent limits.
-    // Trimmed like the presented token, so a stray space in the container setting doesn't lock everyone out.
+    // MCP_READ_TOKEN = read tools only; MCP_TOKEN = agents, limited by MCP_WRITE_PATHS; MCP_ADMIN_TOKEN = write
+    // anywhere. None set = open, agent limits. Trimmed like the presented token, so a stray space in the container
+    // setting doesn't lock everyone out.
     const tokens = {
+      reader: (process.env.MCP_READ_TOKEN || "").trim(),
       agent: (process.env.MCP_TOKEN || "").trim(),
       admin: (process.env.MCP_ADMIN_TOKEN || "").trim(),
     };
-    const auth = Boolean(tokens.agent || tokens.admin);
+    const auth = ROLES.some((r) => tokens[r]);
 
     if (auth) {
       ctx.router.use(requireBearer(tokens));
@@ -77,7 +82,10 @@ module.exports = {
       });
 
       try {
-        registerTools(server, ctx, { writable: req.mcpRole === "admin" ? null : writePaths() });
+        registerTools(server, ctx, {
+          readOnly: req.mcpRole === "reader",
+          writable: req.mcpRole === "reader" ? [] : req.mcpRole === "admin" ? null : writePaths(),
+        });
         await server.connect(transport);
         await transport.handleRequest(req, res, req.body);
       } catch (e) {
@@ -107,8 +115,17 @@ module.exports = {
     ctx.log(
       `MCP endpoint ready at /api/ext/${this.id}` +
         (auth
-          ? ` (bearer token required: ${[tokens.agent && "agent", tokens.admin && "admin"].filter(Boolean).join(" + ")})`
+          ? ` (bearer token required: ${ROLES.filter((r) => tokens[r]).join(" + ")})`
           : " (no auth: set MCP_TOKEN to require a bearer token)"),
+    );
+
+    const writable = writePaths();
+    ctx.log(
+      writable === null
+        ? "Agents may write anywhere (MCP_WRITE_PATHS unset or *)"
+        : writable.length
+          ? `Agents may write to: ${writable.join(", ")}`
+          : "Agents may not write anywhere (MCP_TOKEN set without MCP_WRITE_PATHS)",
     );
 
     const embed = semantic.embedConfig();

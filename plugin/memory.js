@@ -1,8 +1,8 @@
 // remember / forget: memory notes with consistent frontmatter, so a small model only has to supply the text.
 // A memory is a note in the memory vault's inbox (MCP_MEMORY_VAULT, default MCP_DEFAULT_VAULT; MCP_MEMORY_INBOX,
-// default "Inbox"), with frontmatter type / source / date / status. Writes go through writeNote, so the caller's
+// default "Inbox"), with frontmatter type / source / date / status. Writes go through updateNote, so the caller's
 // writable paths still apply.
-const { ToolError, defaultVault, readNote, writeNote } = require("./vault");
+const { FRONTMATTER, ToolError, defaultVault, updateNote } = require("./vault");
 
 const MEMORY_TYPES = ["fact", "preference", "episode", "procedure"];
 
@@ -24,7 +24,7 @@ function noteTitle(title, text) {
   const source = (title || "").trim() || text.trim().split(/\s+/).slice(0, 8).join(" ");
 
   return source
-    .replace(/[\\/:*?"<>|#^[\]\r\n\t]+/g, " ")
+    .replace(/[\/:*?"<>|#^[\]\r\n\t]+/g, " ")
     .replace(/\s+/g, " ")
     .replace(/^[\s.]+|[\s.,;!]+$/g, "")
     .slice(0, 80)
@@ -35,25 +35,41 @@ function yamlString(s) {
   return JSON.stringify(String(s));
 }
 
+// A top-level "key:" line. The lines after it that aren't one (indented, "- item", blank) belong to that key.
+const KEY_LINE = /^([^\s#:-][^:]*):(?:\s|$)/;
+
 // Sets top-level keys in a note's YAML frontmatter (null removes one), adding the block when there is none.
-// Other keys stay as they are.
+// A key is replaced with all its lines and duplicates are dropped; other keys stay as they are.
 function setFrontmatter(text, fields) {
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/);
-  let body = m ? m[1].split(/\r?\n/) : [];
+  const m = text.match(FRONTMATTER);
+  let entries = [];
 
-  for (const [k, v] of Object.entries(fields)) {
-    const i = body.findIndex((l) => l.startsWith(`${k}:`));
+  for (const line of m && m[1] ? m[1].split(/\r?\n/) : []) {
+    const key = KEY_LINE.exec(line);
 
-    if (v === null) {
-      body = body.filter((l) => !l.startsWith(`${k}:`));
-    } else if (i >= 0) {
-      body[i] = `${k}: ${v}`;
+    if (key || entries.length === 0) {
+      entries.push({ key: key ? key[1].trim() : null, lines: [line] });
     } else {
-      body.push(`${k}: ${v}`);
+      entries[entries.length - 1].lines.push(line);
     }
   }
 
-  return `---\n${body.join("\n")}\n---\n${m ? text.slice(m[0].length) : text}`;
+  for (const [k, v] of Object.entries(fields)) {
+    const first = entries.findIndex((e) => e.key === k);
+
+    if (v !== null && first >= 0) {
+      entries[first] = { key: k, lines: [`${k}: ${v}`], keep: true };
+    }
+
+    entries = entries.filter((e) => e.key !== k || e.keep).map(({ keep, ...e }) => e);
+
+    if (v !== null && first < 0) {
+      entries.push({ key: k, lines: [`${k}: ${v}`] });
+    }
+  }
+
+  const body = entries.flatMap((e) => e.lines);
+  return `---\n${body.join("\n")}${body.length ? "\n" : ""}---\n${m ? text.slice(m[0].length) : text}`;
 }
 
 async function remember(vault, { text, title, type, source }, allowed) {
@@ -64,57 +80,31 @@ async function remember(vault, { text, title, type, source }, allowed) {
     name = `${date} ${name}`;
   }
 
-  const rel = `${memoryConfig().inbox}/${name}.md`;
   const body = text.trim();
-
-  try {
-    const result = await writeNote(
-      vault,
-      rel,
-      `${setFrontmatter("", { type, source: yamlString(source || "assistant"), date, status: "inbox" })}# ${name}\n\n${body}\n`,
-      "create",
-      allowed,
-    );
-    return { ...result, vault: vault.id };
-  } catch (e) {
-    if (!(e instanceof ToolError) || !e.message.startsWith("Note already exists")) {
-      throw e;
-    }
-  }
 
   // Same title: add to the existing memory instead of making a near-duplicate. New information makes it current
   // again and puts it back up for review, even if it had been forgotten.
-  const note = await readNote(vault, rel);
+  const result = await updateNote(vault, `${memoryConfig().inbox}/${name}.md`, allowed, (existing) => {
+    if (existing === null) {
+      return `${setFrontmatter("", { type, source: yamlString(source || "assistant"), date, status: "inbox" })}# ${name}\n\n${body}\n`;
+    }
 
-  if (note.truncated) {
-    throw new ToolError(`${note.path} is too large to update safely.`);
-  }
-
-  const current = setFrontmatter(note.content, {
-    date,
-    status: "inbox",
-    outdated_on: null,
-    outdated_reason: null,
+    const current = setFrontmatter(existing, { date, status: "inbox", outdated_on: null, outdated_reason: null });
+    return `${current}${current.endsWith("\n") ? "" : "\n"}\n## Update ${date}\n\n${body}\n`;
   });
-  const next = `${current}${current.endsWith("\n") ? "" : "\n"}\n## Update ${date}\n\n${body}\n`;
-  const result = await writeNote(vault, rel, next, "overwrite", allowed);
-  return { ...result, vault: vault.id, updated: true };
+
+  return { ...result, vault: vault.id, ...(result.created ? {} : { updated: true }) };
 }
 
 async function forget(vault, { path, reason }, allowed) {
-  // Like the write tools, accept a path without ".md".
-  const note = await readNote(vault, /\.[^/]+$/.test(path) ? path : `${path}.md`);
+  const result = await updateNote(vault, path, allowed, (existing, file) => {
+    if (existing === null) {
+      throw new ToolError(`Note not found: ${file.rel}`);
+    }
 
-  if (note.truncated) {
-    throw new ToolError(`${note.path} is too large to update safely.`);
-  }
-
-  const next = setFrontmatter(note.content, {
-    status: "outdated",
-    outdated_on: today(),
-    outdated_reason: yamlString(reason),
+    return setFrontmatter(existing, { status: "outdated", outdated_on: today(), outdated_reason: yamlString(reason) });
   });
-  const result = await writeNote(vault, note.path, next, "overwrite", allowed);
+
   return { ...result, vault: vault.id, status: "outdated" };
 }
 

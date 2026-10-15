@@ -34,7 +34,8 @@ function ok(data) {
   };
 }
 
-// Expected failures (bad path, unknown vault) go back to the model as tool errors it can correct; anything else is logged too.
+// Expected failures (bad path, unknown vault) go back to the model as tool errors it can correct. Anything else is
+// only logged: its message can contain absolute server paths.
 function wrap(ctx, name, fn) {
   return async (args) => {
     try {
@@ -44,12 +45,14 @@ function wrap(ctx, name, fn) {
         ctx.log(`${name} failed: ${e.stack || e.message}`);
       }
 
-      return { content: [{ type: "text", text: e.message }], isError: true };
+      const text = e instanceof ToolError ? e.message : `${name} failed unexpectedly; details are in the Ignis log.`;
+      return { content: [{ type: "text", text }], isError: true };
     }
   };
 }
 
-// access.writable: where this caller may write (null = anywhere), decided by its token in index.js.
+// access.writable: where this caller may write (null = anywhere); access.readOnly: no write tools at all.
+// Both are decided by the caller's token in index.js.
 function registerTools(server, ctx, access) {
   server.registerTool(
     "list_vaults",
@@ -143,6 +146,10 @@ function registerTools(server, ctx, access) {
         semanticSearch(ctx, resolveVault(ctx, vault), opts),
       ),
     );
+  }
+
+  if (access.readOnly) {
+    return;
   }
 
   server.registerTool(
