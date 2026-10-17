@@ -19,12 +19,13 @@ function today(now = new Date()) {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
-// A usable file name: no path or Obsidian link characters, no leading dots, at most 80 characters.
+// A usable file name: no path (either slash: paths treat "\" as "/") or Obsidian link characters, no leading dots,
+// at most 80 characters.
 function noteTitle(title, text) {
   const source = (title || "").trim() || text.trim().split(/\s+/).slice(0, 8).join(" ");
 
   return source
-    .replace(/[\/:*?"<>|#^[\]\r\n\t]+/g, " ")
+    .replace(/[\/\\:*?"<>|#^[\]\r\n\t\0]+/g, " ")
     .replace(/\s+/g, " ")
     .replace(/^[\s.]+|[\s.,;!]+$/g, "")
     .slice(0, 80)

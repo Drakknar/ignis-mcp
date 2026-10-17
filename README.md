@@ -55,14 +55,14 @@ The token only protects the MCP endpoint. Ignis's own web UI has no login, so ke
 | `remember` | Saves a memory with consistent path and frontmatter (see [Memory](#memory)) |
 | `forget` | Marks a memory outdated, with a reason, without deleting it |
 
-The `vault` argument is optional when only one vault is enabled or `MCP_DEFAULT_VAULT` is set. Hidden folders (`.obsidian`, `.trash`, `.git`) are skipped when listing and searching, and writes to them are refused. Paths can't leave the vault, not even through symlinks, and writes are checked against where a symlink really leads, so a link in a writable folder can't reach a read-only one. Writes to the same note are queued, so concurrent calls don't lose each other's changes. Unexpected errors go to the Ignis log; the model only sees that the call failed. Ignis watches the vault folder, so open Obsidian tabs show changes straight away.
+The `vault` argument is optional when only one vault is enabled or `MCP_DEFAULT_VAULT` is set. Hidden folders (`.obsidian`, `.trash`, `.git`) are skipped when listing and searching, and reading or writing them is refused (`.obsidian` holds plugin settings, often with API keys), also through a symlink. Paths can't leave the vault, not even through symlinks, and writes are checked against where a symlink really leads, so a link in a writable folder can't reach a read-only one. Writes to the same note are queued, so concurrent calls don't lose each other's changes. Unexpected errors go to the Ignis log; the model only sees that the call failed. Ignis watches the vault folder, so open Obsidian tabs show changes straight away.
 
 ### Several vaults
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `MCP_DEFAULT_VAULT` | (none) | Vault used when a call names none and more than one vault is enabled |
-| `MCP_WRITE_PATHS` | (see right) | Comma-separated `Vault` or `Vault/folder` entries; with the agent token (or no token), the write tools refuse everything else. The admin token ignores it. E.g. `Agents/Inbox, Agents/Facts` keeps every other vault and folder read-only. `*` = anywhere. Unset = nowhere once `MCP_TOKEN` is set (so a lost setting fails closed), anywhere while the endpoint is open; the startup log says which |
+| `MCP_WRITE_PATHS` | (see right) | Comma-separated `Vault` or `Vault/folder` entries; with the agent token (or no token), the write tools refuse everything else. The admin token ignores it. E.g. `Agents/Inbox, Agents/Facts` keeps every other vault and folder read-only; `Agents/{Inbox,Facts}` is the same. `*` = anywhere. Unset = nowhere once `MCP_TOKEN` is set (so a lost setting fails closed), anywhere while the endpoint is open; the startup log says which |
 
 `list_vaults` returns both, so a model can see where it may write.
 

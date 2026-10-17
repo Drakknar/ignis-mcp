@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { ToolError, walk, resolveInVault, MAX_SEARCH_FILE_BYTES } = require("./vault");
+const { ToolError, walk, resolveReadable, statIfExists, MAX_SEARCH_FILE_BYTES } = require("./vault");
 
 // Search by meaning: notes are split into passages, embedded with an Ollama embedding model and
 // compared with the embedded query. Off unless MCP_EMBED_URL points at an Ollama server.
@@ -43,7 +43,8 @@ function normalize(vec) {
   return out;
 }
 
-async function embed(cfg, inputs) {
+// Error messages name the model but not the server: they reach the model, and the URL is internal.
+async function embed(cfg, inputs, log) {
   let res;
 
   try {
@@ -60,17 +61,23 @@ async function embed(cfg, inputs) {
       signal: AbortSignal.timeout(5 * 60 * 1000),
     });
   } catch (e) {
-    throw new ToolError(`Embedding server unreachable at ${cfg.url}: ${e.message}`);
+    log?.(`Embedding server unreachable at ${cfg.url}: ${e.cause?.message || e.message}`);
+    throw new ToolError("Embedding server unreachable; details are in the Ignis log.");
   }
 
   if (!res.ok) {
-    const body = (await res.text()).slice(0, 300);
-    throw new ToolError(`Embedding model "${cfg.model}" failed (${res.status}): ${body}`);
+    const body = (await res.text().catch(() => "")).slice(0, 300);
+    log?.(`Embedding model "${cfg.model}" at ${cfg.url} failed (${res.status}): ${body}`);
+    throw new ToolError(`Embedding model "${cfg.model}" failed (HTTP ${res.status}); details are in the Ignis log.`);
   }
 
-  const { embeddings } = await res.json();
+  const { embeddings } = await res.json().catch(() => ({}));
 
-  if (!Array.isArray(embeddings) || embeddings.length !== inputs.length) {
+  if (
+    !Array.isArray(embeddings) ||
+    embeddings.length !== inputs.length ||
+    !embeddings.every((v) => Array.isArray(v) && v.length > 0 && v.length === embeddings[0].length)
+  ) {
     throw new ToolError(`Embedding model "${cfg.model}" returned an unexpected response`);
   }
 
@@ -100,7 +107,7 @@ function chunkNote(rel, text) {
   // YAML frontmatter is metadata, not prose: skip it so it doesn't dilute the first passage.
   let first = 0;
 
-  if (lines[0] === "---") {
+  if (lines[0].replace(/^\uFEFF/, "") === "---") {
     const end = lines.indexOf("---", 1);
     first = end > 0 ? end + 1 : 0;
   }
@@ -241,7 +248,8 @@ class VaultIndex {
         try {
           await this._sync();
         } catch (e) {
-          this.lastError = e.message;
+          // Only expected errors reach the model; others (file system) can name server paths.
+          this.lastError = e instanceof ToolError ? e.message : "indexing failed; details are in the Ignis log.";
           this.log(`Semantic index for ${this.vault.id} failed: ${e.message}`);
           break;
         }
@@ -258,15 +266,17 @@ class VaultIndex {
 
     const seen = new Set();
     const changed = [];
+    const unreadable = [];
 
-    for await (const file of walk(this.vault.root, this.vault.root)) {
+    for await (const file of walk(this.vault.root, this.vault.root, unreadable)) {
       if (path.extname(file.rel).toLowerCase() !== ".md") {
         continue;
       }
 
-      const stat = await fs.promises.stat(file.abs);
+      // Notes renamed or deleted mid-scan (Obsidian, sync) are simply gone, not a reason to abort the sync.
+      const stat = await statIfExists(file.abs);
 
-      if (stat.size > MAX_SEARCH_FILE_BYTES) {
+      if (!stat || stat.size > MAX_SEARCH_FILE_BYTES) {
         continue;
       }
 
@@ -278,8 +288,16 @@ class VaultIndex {
       }
     }
 
+    // A vault folder that can't be read right now (share offline, permissions) must not wipe the index: a full
+    // rebuild re-embeds every note.
+    if (unreadable.includes("")) {
+      throw new Error(`vault folder unreadable: ${this.vault.root}`);
+    }
+
+    const inUnreadable = (rel) => unreadable.some((dir) => rel.startsWith(`${dir}/`));
+
     for (const rel of this.notes.keys()) {
-      if (!seen.has(rel)) {
+      if (!seen.has(rel) && !inUnreadable(rel)) {
         this.notes.delete(rel);
         this.dirty = true;
       }
@@ -300,7 +318,7 @@ class VaultIndex {
 
         for (let i = 0; i < chunks.length; i += BATCH) {
           const batch = chunks.slice(i, i + BATCH);
-          const vecs = await embed(this.cfg, batch.map((c) => c.input));
+          const vecs = await embed(this.cfg, batch.map((c) => c.input), this.log);
           batch.forEach((c, j) => {
             c.vec = vecs[j];
             delete c.input;
@@ -327,7 +345,9 @@ class VaultIndex {
         continue;
       }
 
+      // Vectors from another model version (other length) would score NaN; dropStale() re-embeds those notes.
       const scored = n.chunks
+        .filter((c) => c.vec.length === qvec.length)
         .map((c) => {
           let s = 0;
 
@@ -338,6 +358,10 @@ class VaultIndex {
           return { c, s };
         })
         .sort((a, b) => b.s - a.s);
+
+      if (scored.length === 0) {
+        continue;
+      }
 
       results.push({
         path: rel,
@@ -353,6 +377,26 @@ class VaultIndex {
 
     results.sort((a, b) => b.score - a.score);
     return results.slice(0, limit);
+  }
+
+  // The model behind the same name changed its vector size (e.g. a new tag was pulled): forget the old vectors so
+  // the next sync embeds those notes again. Returns whether anything was dropped.
+  dropStale(dims) {
+    let dropped = false;
+
+    for (const [rel, n] of this.notes) {
+      if (n.chunks.some((c) => c.vec.length !== dims)) {
+        this.notes.delete(rel);
+        dropped = true;
+      }
+    }
+
+    if (dropped) {
+      this.dirty = true;
+      this.log(`Semantic index for ${this.vault.id}: vector size changed, re-embedding affected notes`);
+    }
+
+    return dropped;
   }
 }
 
@@ -403,7 +447,7 @@ function noteChanged(ctx, vault) {
 
 async function semanticSearch(ctx, vault, { query, folder, limit }) {
   const cfg = embedConfig();
-  const prefix = folder ? resolveInVault(vault, folder).rel : "";
+  const prefix = folder ? resolveReadable(vault, folder).rel : "";
   const index = getIndex(ctx, vault);
 
   // Waits a little for changed notes, so a note written a moment ago can already be found.
@@ -417,7 +461,12 @@ async function semanticSearch(ctx, vault, { query, folder, limit }) {
     throw new ToolError(`Semantic index unavailable: ${index.lastError}`);
   }
 
-  const [qvec] = await embed(cfg, [query]);
+  const [qvec] = await embed(cfg, [query], ctx.log);
+
+  if (index.dropStale(qvec.length)) {
+    index.sync();
+  }
+
   const result = { results: index.search(qvec, { prefix, limit }) };
 
   if (!finished) {

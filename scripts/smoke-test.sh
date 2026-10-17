@@ -19,8 +19,10 @@ printf -- '---\ntags: [demo]\n---\n# Welcome\nThe needle is here.\n' > "$vault/W
 printf 'Nothing to see.\n' > "$vault/Projects/Plan.md"
 printf '{"needle": "hidden config must not be searched"}\n' > "$vault/.obsidian/app.json"
 printf '# Heating\nThe yearly boiler inspection was on 3 March.\n' > "$vault/Projects/House.md"
+# A link that leads a visible path into hidden config.
+ln -s ../.obsidian/app.json "$vault/Projects/Config.md"
 
-# A second vault where only Inbox/ is writable (MCP_WRITE_PATHS below).
+# A second vault where only Inbox/ and Facts/ are writable (MCP_WRITE_PATHS below, as a {...} group).
 other=$work/vaults/Other
 mkdir -p "$other/.obsidian" "$other/Inbox"
 printf 'Read me, but do not change me.\n' > "$other/Root.md"
@@ -37,7 +39,7 @@ embed_pid=$!
 docker run -d --name ignis-smoke -p $port:8080 \
   --add-host=host.docker.internal:host-gateway \
   -e MCP_EMBED_URL=http://host.docker.internal:$embed_port -e MCP_EMBED_MODEL=fake-embed \
-  -e MCP_TOKEN=$token -e MCP_ADMIN_TOKEN=$admin_token -e MCP_READ_TOKEN=$read_token -e MCP_DEFAULT_VAULT=Test -e MCP_WRITE_PATHS="Test, Other/Inbox" \
+  -e MCP_TOKEN=$token -e MCP_ADMIN_TOKEN=$admin_token -e MCP_READ_TOKEN=$read_token -e MCP_DEFAULT_VAULT=Test -e MCP_WRITE_PATHS="Test, Other/{Inbox,Facts}" \
   -e MCP_MEMORY_VAULT=Other \
   -e PUID="$(id -u)" -e PGID="$(id -g)" \
   -v "$work/vaults:/vaults" "$image" >/dev/null
@@ -98,7 +100,7 @@ rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
   | jq -e '[.result.tools[].name] | sort == ["edit_note","forget","list_notes","list_vaults","read_note","remember","search_notes","semantic_search","write_note"]' >/dev/null
 
 echo "list_vaults"
-call list_vaults '{}'   | jq -e '.structuredContent | (.vaults | sort) == ["Other","Test"] and .defaultVault == "Test" and .writable == ["Test","Other/Inbox"]' >/dev/null
+call list_vaults '{}'   | jq -e '.structuredContent | (.vaults | sort) == ["Other","Test"] and .defaultVault == "Test" and .writable == ["Test","Other/Inbox","Other/Facts"]' >/dev/null
 
 echo "list_notes skips hidden folders"
 call list_notes '{}' | jq -e '[.structuredContent.notes[].path] == ["Projects/House.md","Projects/Plan.md","Welcome.md"]' >/dev/null
@@ -155,6 +157,13 @@ call read_note '{"path":"../../etc/passwd"}' | jq -e '.isError == true' >/dev/nu
 echo "writes to .obsidian are refused"
 call write_note '{"path":".obsidian/evil.json","content":"{}","mode":"overwrite"}' | jq -e '.isError == true' >/dev/null
 
+echo "hidden paths can't be read, listed or searched, not even through a symlink"
+call read_note '{"path":".obsidian/app.json"}' | jq -e '.isError == true' >/dev/null
+call read_note '{"path":"Projects/Config.md"}' | jq -e '.isError == true' >/dev/null
+call list_notes '{"folder":".obsidian"}' | jq -e '.isError == true' >/dev/null
+call search_notes '{"query":"needle","folder":".obsidian","extensions":["json"]}' | jq -e '.isError == true' >/dev/null
+call semantic_search '{"query":"needle","folder":".obsidian"}' | jq -e '.isError == true' >/dev/null
+
 echo "unknown vault is refused"
 call list_notes '{"vault":"Nope"}' | jq -e '.isError == true' >/dev/null
 
@@ -170,6 +179,12 @@ call write_note '{"vault":"Other","path":"Inboxes/Fact","content":"x"}' | jq -e 
 call write_note '{"vault":"Other","path":"Inbox/../Sneaky","content":"x"}' | jq -e '.isError == true' >/dev/null
 grep -qx 'Read me, but do not change me.' "$other/Root.md"
 [ ! -e "$other/Inboxes" ] && [ ! -e "$other/Sneaky.md" ]
+
+echo "every folder of a {...} group in MCP_WRITE_PATHS is writable, and only those"
+call write_note '{"vault":"Other","path":"Facts/Brace","content":"ok\n"}' | jq -e '.isError != true' >/dev/null
+grep -qx 'ok' "$other/Facts/Brace.md"
+call write_note '{"vault":"Other","path":"Facts}/X","content":"x"}' | jq -e '.isError == true' >/dev/null
+call write_note '{"vault":"Other","path":"{Inbox/X","content":"x"}' | jq -e '.isError == true' >/dev/null
 
 echo "remember saves to the memory vault's inbox with frontmatter"
 mem='Inbox/Prefers green tea.md'
@@ -189,6 +204,8 @@ echo "remember dates episodes and keeps titles inside the inbox"
 call remember '{"text":"Boiler serviced.","title":"Boiler service","type":"episode"}' \
   | jq -e '.structuredContent.path | test("^Inbox/[0-9]{4}-[0-9]{2}-[0-9]{2} Boiler service[.]md$")' >/dev/null
 call remember '{"text":"x","title":"../../Escape"}' | jq -e '.structuredContent.path == "Inbox/Escape.md"' >/dev/null
+call remember '{"text":"x","title":"..\\..\\Facts\\Escape2"}' | jq -e '.structuredContent.path == "Inbox/Facts Escape2.md"' >/dev/null
+[ ! -e "$other/Facts/Escape2.md" ]
 
 echo "edit_note replaces exactly one passage"
 call edit_note '{"vault":"Other","path":"Inbox/Prefers green tea.md","old_text":"to coffee.","new_text":"to coffee or mate."}' | jq -e '.isError != true' >/dev/null
@@ -224,7 +241,7 @@ auth=$admin_token call write_note '{"vault":"Other","path":".obsidian/evil.json"
 [ "$(status -H "Authorization: Bearer $admin_token")" = 200 ]
 
 echo "an agent call after an admin call is restricted again"
-call list_vaults '{}' | jq -e '.structuredContent.writable == ["Test","Other/Inbox"]' >/dev/null
+call list_vaults '{}' | jq -e '.structuredContent.writable == ["Test","Other/Inbox","Other/Facts"]' >/dev/null
 call write_note '{"vault":"Other","path":"Root.md","content":"x","mode":"overwrite"}' | jq -e '.isError == true' >/dev/null
 
 echo "paths can't escape the writable folders in other spellings"
@@ -274,5 +291,12 @@ printf -- '---\nstatus: inbox\nnote: |\n  two\n  lines\nstatus: inbox\n---\n# Du
 call forget '{"vault":"Other","path":"Inbox/Dup","reason":"x"}' | jq -e '.isError != true' >/dev/null
 [ "$(grep -c '^status:' "$other/Inbox/Dup.md")" = 1 ]
 grep -qx 'status: outdated' "$other/Inbox/Dup.md"
+
+echo "a byte-order mark before the frontmatter doesn't produce a second block"
+printf '\xEF\xBB\xBF---\nstatus: inbox\n---\n# Bom\n' > "$other/Inbox/Bom.md"
+call forget '{"vault":"Other","path":"Inbox/Bom","reason":"x"}' | jq -e '.isError != true' >/dev/null
+[ "$(grep -c 'status:' "$other/Inbox/Bom.md")" = 1 ]
+[ "$(grep -c -e '---' "$other/Inbox/Bom.md")" = 2 ]
+grep -qx 'status: outdated' "$other/Inbox/Bom.md"
 
 echo "All smoke tests passed"

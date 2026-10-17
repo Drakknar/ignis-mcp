@@ -11,7 +11,91 @@ function defaultVault(env = process.env) {
   return (env.MCP_DEFAULT_VAULT || "").trim() || null;
 }
 
+// Splits on commas outside {...}, so "Agents/{Inbox,Facts}, Notes" is two entries, not four.
+function splitEntries(raw) {
+  const out = [];
+  let depth = 0;
+  let cur = "";
+
+  for (const ch of raw) {
+    if (ch === "{") {
+      depth++;
+    } else if (ch === "}" && depth > 0) {
+      depth--;
+    } else if (ch === "," && depth === 0) {
+      out.push(cur);
+      cur = "";
+      continue;
+    }
+
+    cur += ch;
+  }
+
+  out.push(cur);
+  return out;
+}
+
+// "Agents/{Inbox,Facts}" -> ["Agents/Inbox", "Agents/Facts"]; several or nested groups expand too. An unbalanced
+// brace stays literal, so it matches no real folder (fails closed).
+function expandBraces(entry) {
+  const open = entry.indexOf("{");
+
+  if (open < 0) {
+    return [entry];
+  }
+
+  let depth = 0;
+  let close = -1;
+  const commas = [];
+
+  for (let i = open; i < entry.length && close < 0; i++) {
+    if (entry[i] === "{") {
+      depth++;
+    } else if (entry[i] === "}") {
+      depth--;
+
+      if (depth === 0) {
+        close = i;
+      }
+    } else if (entry[i] === "," && depth === 1) {
+      commas.push(i);
+    }
+  }
+
+  if (close < 0) {
+    return [entry];
+  }
+
+  const bounds = [open, ...commas, close];
+  const head = entry.slice(0, open);
+  const tail = entry.slice(close + 1);
+  const out = [];
+
+  for (let i = 0; i < bounds.length - 1; i++) {
+    out.push(...expandBraces(head + entry.slice(bounds[i] + 1, bounds[i + 1]) + tail));
+  }
+
+  return out;
+}
+
+// "Vault/./Inbox/" -> "Vault/Inbox", so harmless spellings in the setting still match. An entry with ".." is
+// dropped (fails closed) rather than resolved, so "Agents/../Other" never grants another vault.
+function normalizeEntry(entry) {
+  const p = entry.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+
+  if (p === "*" || !p) {
+    return p;
+  }
+
+  if (p.split("/").includes("..")) {
+    return "";
+  }
+
+  return path.posix.normalize(p).replace(/\/+$/, "");
+}
+
 // MCP_WRITE_PATHS: comma-separated "Vault" or "Vault/folder" entries that agents may change; "*" = anywhere (null).
+// "Vault/{A,B}" stands for "Vault/A, Vault/B".
 // Unset = anywhere only while the endpoint is open; with MCP_TOKEN set it means nothing, so a lost setting fails closed.
 function writePaths(env = process.env) {
   const raw = (env.MCP_WRITE_PATHS || "").trim();
@@ -20,12 +104,12 @@ function writePaths(env = process.env) {
     return (env.MCP_TOKEN || "").trim() ? [] : null;
   }
 
-  const entries = raw
-    .split(",")
-    .map((p) => p.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, ""))
-    .filter(Boolean);
+  const entries = splitEntries(raw)
+    .flatMap((e) => expandBraces(e.trim()))
+    .map(normalizeEntry)
+    .filter((e) => e && e !== ".");
 
-  return entries.includes("*") ? null : entries;
+  return entries.includes("*") ? null : [...new Set(entries)];
 }
 
 function isWritable(vaultId, rel, allowed = writePaths()) {
@@ -135,12 +219,42 @@ function resolveInVault(vault, relPath = "") {
   };
 }
 
-async function* walk(dir, root) {
+// For reading, listing and searching: hidden paths (.obsidian holds plugin settings, often with API keys) are off
+// limits, also when a symlink leads there. The vault root itself ("") is fine.
+function resolveReadable(vault, relPath = "") {
+  const file = resolveInVault(vault, relPath);
+
+  for (const rel of [file.rel, file.realRel]) {
+    if (rel && isHiddenPath(rel)) {
+      throw new ToolError(`Hidden and config paths can't be read: ${file.rel}`);
+    }
+  }
+
+  return file;
+}
+
+// A file that disappears between listing and reading (renamed or synced away) is skipped, not an error.
+async function statIfExists(abs) {
+  try {
+    return await fs.promises.stat(abs);
+  } catch (e) {
+    if (e.code === "ENOENT" || e.code === "ENOTDIR") {
+      return null;
+    }
+
+    throw e;
+  }
+}
+
+// errors, when given, collects the folders (relative to root, "" = root) that couldn't be read, so a caller can
+// tell "gone" from "unreadable right now".
+async function* walk(dir, root, errors) {
   let entries;
 
   try {
     entries = await fs.promises.readdir(dir, { withFileTypes: true });
   } catch {
+    errors?.push(toPosix(path.relative(root, dir)));
     return;
   }
 
@@ -154,7 +268,7 @@ async function* walk(dir, root) {
     const abs = path.join(dir, entry.name);
 
     if (entry.isDirectory()) {
-      yield* walk(abs, root);
+      yield* walk(abs, root, errors);
     } else if (entry.isFile()) {
       yield { abs, rel: toPosix(path.relative(root, abs)) };
     }
@@ -162,7 +276,7 @@ async function* walk(dir, root) {
 }
 
 async function listNotes(vault, { folder, extensions, limit }) {
-  const base = resolveInVault(vault, folder);
+  const base = resolveReadable(vault, folder);
   const exts = normalizeExtensions(extensions);
   const notes = [];
   let truncated = false;
@@ -177,7 +291,12 @@ async function listNotes(vault, { folder, extensions, limit }) {
       break;
     }
 
-    const stat = await fs.promises.stat(file.abs);
+    const stat = await statIfExists(file.abs);
+
+    if (!stat) {
+      continue;
+    }
+
     notes.push({
       path: file.rel,
       size: stat.size,
@@ -189,7 +308,7 @@ async function listNotes(vault, { folder, extensions, limit }) {
 }
 
 async function readNote(vault, relPath) {
-  const file = resolveInVault(vault, relPath);
+  const file = resolveReadable(vault, relPath);
   let stat;
 
   try {
@@ -277,7 +396,7 @@ function buildMatcher(query, { regex, caseSensitive }) {
 // Keyword search over whole notes: every word must appear somewhere in the note (file name
 // included), in any order. When no note has them all, notes with the most (and rarest) words win.
 async function searchNotes(vault, opts) {
-  const base = resolveInVault(vault, opts.folder);
+  const base = resolveReadable(vault, opts.folder);
   const exts = normalizeExtensions(opts.extensions) || [".md"];
   const { terms, find } = buildMatcher(opts.query, opts);
   const notes = [];
@@ -287,12 +406,18 @@ async function searchNotes(vault, opts) {
       continue;
     }
 
+    const stat = await statIfExists(file.abs);
+
+    if (!stat) {
+      continue;
+    }
+
     const present = new Set(find(file.rel));
     const lines = present.size ? [{ line: 0, text: "(file name match)", hits: present.size }] : [];
-    const stat = await fs.promises.stat(file.abs);
+    const text = stat.size <= MAX_SEARCH_FILE_BYTES ? await readIfExists(file.abs) : null;
 
-    if (stat.size <= MAX_SEARCH_FILE_BYTES) {
-      const content = (await fs.promises.readFile(file.abs, "utf-8")).split(/\r?\n/);
+    if (text !== null) {
+      const content = text.split(/\r?\n/);
 
       for (let i = 0; i < content.length; i++) {
         const found = find(content[i]);
@@ -349,8 +474,9 @@ async function searchNotes(vault, opts) {
   return result;
 }
 
-// A note's YAML frontmatter block; group 1 is its body (undefined when the block is empty).
-const FRONTMATTER = /^---\r?\n(?:([\s\S]*?)\r?\n)?---(?:\r?\n|$)/;
+// A note's YAML frontmatter block, after an optional byte-order mark (Windows editors add one); group 1 is its body
+// (undefined when the block is empty).
+const FRONTMATTER = /^\uFEFF?---\r?\n(?:([\s\S]*?)\r?\n)?---(?:\r?\n|$)/;
 
 // Inserting at the very top would break a note's YAML frontmatter, so prepend goes right after it.
 function insertAfterFrontmatter(existing, content) {
@@ -514,6 +640,8 @@ module.exports = {
   writePaths,
   resolveVault,
   resolveInVault,
+  resolveReadable,
+  statIfExists,
   walk,
   listNotes,
   readNote,
