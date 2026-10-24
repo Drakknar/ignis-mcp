@@ -103,7 +103,7 @@ Add these variables to the Ignis container:
 
 If your main Ollama sets `OLLAMA_MAX_LOADED_MODELS=1`, loading the embedding model still unloads the chat model, even on the CPU. Run a second, CPU-only Ollama container (no `--gpus`) for embeddings; it can share the main one's models folder.
 
-How it works: each note is split into passages at its headings (long sections at paragraph breaks; YAML frontmatter is skipped), and each passage is embedded together with the note title and heading. The index lives in the plugin's data folder (`<data>/plugins/mcp/semantic-<vault>-<model>.json`). It is built in the background when a vault is enabled, refreshed every 15 minutes, after every `write_note`, and before each search (only notes whose size or modified time changed are embedded again), so edits made in Obsidian are picked up too. While the first index is still building, results say so and may be incomplete. Changing `MCP_EMBED_MODEL` starts a new index.
+How it works: each note is split into passages at its headings (long sections at paragraph breaks; YAML frontmatter is skipped), and each passage is embedded together with the note title and heading. The index lives in the plugin's data folder (`<data>/plugins/mcp/semantic-<vault>-<model>-<hash>.json`). It is built in the background when a vault is enabled, refreshed every 15 minutes, after every `write_note`, and before each search (only notes whose size or modified time changed are embedded again), so edits made in Obsidian are picked up too. While the first index is still building, results say so and may be incomplete. Changing `MCP_EMBED_MODEL` starts a new index.
 
 ## Layout
 

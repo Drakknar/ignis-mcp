@@ -1,8 +1,15 @@
 const fs = require("fs");
 const path = require("path");
+const vm = require("vm");
 
 const MAX_READ_BYTES = 1024 * 1024;
 const MAX_SEARCH_FILE_BYTES = 2 * 1024 * 1024;
+// A regex search may spend at most this long matching, summed over all files. A pattern that backtracks
+// catastrophically (e.g. "(a+)+$") would otherwise block the whole Ignis server, not just this call.
+const REGEX_BUDGET_MS = 3000;
+// Every keyword is looked up in every line, so a huge query (thousands of words) would block the server for many
+// seconds per note. Far more than "a few short keywords".
+const MAX_QUERY_CHARS = 1000;
 
 class ToolError extends Error {}
 
@@ -307,6 +314,23 @@ async function listNotes(vault, { folder, extensions, limit }) {
   return { notes, truncated };
 }
 
+// Where to cut buf[0..len) so it doesn't end inside a multi-byte UTF-8 character: if the last character is
+// incomplete, the cut moves back to its first byte.
+function utf8CutPoint(buf, len) {
+  let i = len - 1;
+
+  while (i >= 0 && i > len - 4 && (buf[i] & 0xc0) === 0x80) {
+    i--;
+  }
+
+  if (i < 0 || buf[i] < 0xc0) {
+    return len;
+  }
+
+  const size = buf[i] >= 0xf0 ? 4 : buf[i] >= 0xe0 ? 3 : 2;
+  return i + size > len ? i : len;
+}
+
 async function readNote(vault, relPath) {
   const file = resolveReadable(vault, relPath);
   let stat;
@@ -326,12 +350,14 @@ async function readNote(vault, relPath) {
   try {
     const length = Math.min(stat.size, MAX_READ_BYTES);
     const buf = Buffer.alloc(length);
-    await handle.read(buf, 0, length, 0);
+    const { bytesRead } = await handle.read(buf, 0, length, 0);
+    const truncated = stat.size > MAX_READ_BYTES;
+    const end = truncated ? utf8CutPoint(buf, bytesRead) : bytesRead;
 
     return {
       path: file.rel,
-      content: buf.toString("utf-8"),
-      truncated: stat.size > MAX_READ_BYTES,
+      content: buf.toString("utf-8", 0, end),
+      truncated,
       modified: stat.mtime.toISOString(),
     };
   } finally {
@@ -356,18 +382,60 @@ function parseTerms(query, caseSensitive) {
   return [...new Set(terms)];
 }
 
-// Returns the parsed terms and a find(text) giving the indexes of the terms present in it.
-function buildMatcher(query, { regex, caseSensitive }) {
-  if (regex) {
-    let re;
+// Matching runs in a vm context with a timeout: V8 interrupts a running regex there, so a pathological pattern
+// costs at most REGEX_BUDGET_MS per search instead of hanging the server.
+const REGEX_SCAN = new vm.Script(
+  "out = []; for (let i = 0; i < texts.length; i++) { if (re.test(texts[i])) out.push(i); }",
+);
+
+function regexMatcher(query, caseSensitive, budgetMs = REGEX_BUDGET_MS) {
+  let re;
+
+  try {
+    re = new RegExp(query, caseSensitive ? "" : "i");
+  } catch (e) {
+    throw new ToolError(`Invalid regex: ${e.message}`);
+  }
+
+  const sandbox = vm.createContext({ re, texts: [], out: [] });
+  // Only time spent matching counts: reading the notes between calls (slow on a network share) must not use it up.
+  let leftMs = budgetMs;
+
+  // findAll(texts) -> for each text, [0] when it matches, [] otherwise.
+  const findAll = (texts) => {
+    sandbox.texts = texts;
+    const start = Date.now();
 
     try {
-      re = new RegExp(query, caseSensitive ? "" : "i");
+      REGEX_SCAN.runInContext(sandbox, { timeout: Math.max(1, leftMs) });
     } catch (e) {
-      throw new ToolError(`Invalid regex: ${e.message}`);
+      if (e.code === "ERR_SCRIPT_EXECUTION_TIMEOUT") {
+        throw new ToolError(
+          "The regular expression took too long to match (it may backtrack heavily, e.g. nested quantifiers like (a+)+). Simplify it, narrow the folder, or search with keywords instead.",
+        );
+      }
+
+      throw e;
+    } finally {
+      leftMs -= Date.now() - start;
+      sandbox.texts = [];
     }
 
-    return { terms: [query], find: (text) => (re.test(text) ? [0] : []) };
+    const hits = new Set(sandbox.out);
+    return texts.map((_, i) => (hits.has(i) ? [0] : []));
+  };
+
+  return { terms: [query], findAll };
+}
+
+// Returns the parsed terms and a findAll(texts) giving, for each text, the indexes of the terms present in it.
+function buildMatcher(query, { regex, caseSensitive }) {
+  if (query.length > MAX_QUERY_CHARS) {
+    throw new ToolError(`The query is too long (${query.length} characters, at most ${MAX_QUERY_CHARS}). Use a few short keywords.`);
+  }
+
+  if (regex) {
+    return regexMatcher(query, caseSensitive);
   }
 
   const terms = parseTerms(query, caseSensitive);
@@ -376,21 +444,20 @@ function buildMatcher(query, { regex, caseSensitive }) {
     throw new ToolError("The query has no searchable words");
   }
 
-  return {
-    terms,
-    find: (text) => {
-      const hay = caseSensitive ? text : text.toLowerCase();
-      const found = [];
+  const find = (text) => {
+    const hay = caseSensitive ? text : text.toLowerCase();
+    const found = [];
 
-      terms.forEach((t, i) => {
-        if (hay.includes(t)) {
-          found.push(i);
-        }
-      });
+    terms.forEach((t, i) => {
+      if (hay.includes(t)) {
+        found.push(i);
+      }
+    });
 
-      return found;
-    },
+    return found;
   };
+
+  return { terms, findAll: (texts) => texts.map(find) };
 }
 
 // Keyword search over whole notes: every word must appear somewhere in the note (file name
@@ -398,7 +465,7 @@ function buildMatcher(query, { regex, caseSensitive }) {
 async function searchNotes(vault, opts) {
   const base = resolveReadable(vault, opts.folder);
   const exts = normalizeExtensions(opts.extensions) || [".md"];
-  const { terms, find } = buildMatcher(opts.query, opts);
+  const { terms, findAll } = buildMatcher(opts.query, opts);
   const notes = [];
 
   for await (const file of walk(base.abs, vault.root)) {
@@ -412,15 +479,17 @@ async function searchNotes(vault, opts) {
       continue;
     }
 
-    const present = new Set(find(file.rel));
+    const present = new Set(findAll([file.rel])[0]);
     const lines = present.size ? [{ line: 0, text: "(file name match)", hits: present.size }] : [];
-    const text = stat.size <= MAX_SEARCH_FILE_BYTES ? await readIfExists(file.abs) : null;
+    // A note that can't be read (permissions, I/O error) is left out of the results instead of failing the search.
+    const text = stat.size <= MAX_SEARCH_FILE_BYTES ? await readIfExists(file.abs).catch(() => null) : null;
 
     if (text !== null) {
       const content = text.split(/\r?\n/);
+      const foundPerLine = findAll(content);
 
       for (let i = 0; i < content.length; i++) {
-        const found = find(content[i]);
+        const found = foundPerLine[i];
 
         if (found.length) {
           found.forEach((t) => present.add(t));
@@ -549,6 +618,15 @@ async function readIfExists(abs) {
   }
 }
 
+// The path was checked before the lock was taken; a folder on the way could have been swapped for a symlink since
+// (directly on the share, not via MCP). Checked again once the folders exist, just before writing, and the note
+// itself is opened without following a symlink. Best effort: this narrows the window, it can't close it.
+function recheckWritable(vault, relPath, allowed, file) {
+  if (resolveWritable(vault, relPath, allowed).abs !== file.abs) {
+    throw new ToolError(`The path changed while writing (a folder was moved or replaced): ${file.rel}`);
+  }
+}
+
 // The one way notes are changed: checks the path, then, under the note's lock, reads it (null = missing), lets
 // change(existing) return the new text and writes it. A new note is created exclusively, never over a file that
 // appeared in the meantime.
@@ -561,7 +639,16 @@ async function updateNote(vault, relPath, allowed, change) {
       const next = await change(existing, file);
 
       await fs.promises.mkdir(path.dirname(file.abs), { recursive: true });
-      await fs.promises.writeFile(file.abs, next, { encoding: "utf-8", flag: existing === null ? "wx" : "w" });
+      recheckWritable(vault, relPath, allowed, file);
+
+      const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | (existing === null ? fs.constants.O_EXCL : fs.constants.O_TRUNC);
+      const handle = await fs.promises.open(file.abs, flags | (fs.constants.O_NOFOLLOW || 0), 0o666);
+
+      try {
+        await handle.writeFile(next, "utf-8");
+      } finally {
+        await handle.close();
+      }
 
       return { path: file.rel, created: existing === null, bytes: Buffer.byteLength(next) };
     } catch (e) {
@@ -571,6 +658,10 @@ async function updateNote(vault, relPath, allowed, change) {
 
       if (e.code === "EISDIR" || e.code === "ENOTDIR") {
         throw new ToolError(`Not a note: ${file.rel}`);
+      }
+
+      if (e.code === "ELOOP") {
+        throw new ToolError(`The note was replaced by a symlink while writing: ${file.rel}`);
       }
 
       throw e;
@@ -634,6 +725,8 @@ function normalizeExtensions(exts) {
 
 module.exports = {
   MAX_SEARCH_FILE_BYTES,
+  MAX_QUERY_CHARS,
+  regexMatcher,
   FRONTMATTER,
   ToolError,
   defaultVault,
@@ -645,6 +738,7 @@ module.exports = {
   walk,
   listNotes,
   readNote,
+  utf8CutPoint,
   searchNotes,
   updateNote,
   writeNote,

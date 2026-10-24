@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { ToolError, walk, resolveReadable, statIfExists, MAX_SEARCH_FILE_BYTES } = require("./vault");
@@ -159,14 +160,28 @@ function safeName(s) {
   return String(s).replace(/[^\w.-]+/g, "_");
 }
 
+// Up to 0.8.0 the index file was named after safeName() alone, so "My Vault" and "My_Vault" shared one file and
+// overwrote each other's index. The readable part stays, and a hash of the exact vault and model makes it unique.
+function legacyIndexFile(dataDir, vaultId, model) {
+  return path.join(dataDir, `semantic-${safeName(vaultId)}-${safeName(model)}.json`);
+}
+
+function indexFile(dataDir, vaultId, model) {
+  const hash = crypto.createHash("sha256").update(JSON.stringify([vaultId, model])).digest("hex").slice(0, 12);
+  return path.join(dataDir, `semantic-${safeName(vaultId)}-${safeName(model)}-${hash}.json`);
+}
+
 // One index per vault, kept in memory and saved to the plugin's data folder. It is brought up to
 // date by comparing each note's mtime and size, so edits made in Obsidian are picked up too.
 class VaultIndex {
-  constructor(vault, cfg, dataDir, log) {
+  // enabledVaults() lists the enabled vault ids; it decides whether an old shared-name index can be taken over.
+  constructor(vault, cfg, dataDir, log, enabledVaults = () => []) {
     this.vault = vault;
     this.cfg = cfg;
     this.log = log;
-    this.file = path.join(dataDir, `semantic-${safeName(vault.id)}-${safeName(cfg.model)}.json`);
+    this.enabledVaults = enabledVaults;
+    this.file = indexFile(dataDir, vault.id, cfg.model);
+    this.legacyFile = legacyIndexFile(dataDir, vault.id, cfg.model);
     this.notes = new Map();
     this.loaded = false;
     this.running = null;
@@ -184,9 +199,15 @@ class VaultIndex {
     }
 
     this.loaded = true;
+    await this.adoptLegacy();
 
     try {
       const data = JSON.parse(await fs.promises.readFile(this.file, "utf-8"));
+
+      // Written for another vault or model (should not happen with hashed names): start over rather than mix.
+      if ((data.vault !== undefined && data.vault !== this.vault.id) || (data.model !== undefined && data.model !== this.cfg.model)) {
+        throw new Error("index belongs to another vault or model");
+      }
 
       for (const [rel, n] of Object.entries(data.notes || {})) {
         this.notes.set(rel, {
@@ -203,6 +224,27 @@ class VaultIndex {
       if (e.code !== "ENOENT") {
         this.log(`Semantic index for ${this.vault.id} unreadable, rebuilding: ${e.message}`);
       }
+    }
+  }
+
+  // Moves an index saved under the old name to the new one, so upgrading doesn't re-embed every note. Skipped when
+  // another enabled vault maps to the same old name: the file may hold that vault's notes.
+  async adoptLegacy() {
+    if (fs.existsSync(this.file) || !fs.existsSync(this.legacyFile)) {
+      return;
+    }
+
+    const shared = this.enabledVaults().some((id) => id !== this.vault.id && safeName(id) === safeName(this.vault.id));
+
+    if (shared) {
+      this.log(`Semantic index for ${this.vault.id}: old index file is shared with another vault, rebuilding`);
+      return;
+    }
+
+    try {
+      await fs.promises.rename(this.legacyFile, this.file);
+    } catch (e) {
+      this.log(`Semantic index for ${this.vault.id}: old index file not moved, rebuilding: ${e.message}`);
     }
   }
 
@@ -227,7 +269,7 @@ class VaultIndex {
     }
 
     const tmp = `${this.file}.tmp`;
-    await fs.promises.writeFile(tmp, JSON.stringify({ version: 1, model: this.cfg.model, notes }));
+    await fs.promises.writeFile(tmp, JSON.stringify({ version: 1, vault: this.vault.id, model: this.cfg.model, notes }));
     await fs.promises.rename(tmp, this.file);
     this.dirty = false;
     this.lastSave = Date.now();
@@ -408,7 +450,7 @@ function getIndex(ctx, vault) {
   const key = `${vault.id}\0${vault.root}\0${cfg.model}`;
 
   if (!indexes.has(key)) {
-    indexes.set(key, new VaultIndex(vault, cfg, ctx.dataDir, ctx.log));
+    indexes.set(key, new VaultIndex(vault, cfg, ctx.dataDir, ctx.log, () => ctx.getEnabledVaults()));
   }
 
   return indexes.get(key);
@@ -480,6 +522,8 @@ async function semanticSearch(ctx, vault, { query, folder, limit }) {
 }
 
 module.exports = {
+  VaultIndex,
+  indexFile,
   embedConfig,
   chunkNote,
   startVault,

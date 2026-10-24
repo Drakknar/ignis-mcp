@@ -1,5 +1,6 @@
 const { z } = require("zod");
 const {
+  MAX_QUERY_CHARS,
   ToolError,
   defaultVault,
   resolveVault,
@@ -112,7 +113,7 @@ function registerTools(server, ctx, access) {
         "Keyword search across note names and contents. Pass a few short keywords, not a whole question: for \"What do I need to buy a flat in Berlin?\" search \"flat Berlin buy\". A note matches when it contains every keyword anywhere, in any order (\"Wohnung\" also matches \"Wohnungskauf\"); put a phrase in double quotes to keep it together. If no note has them all, the notes with the most keywords come back instead (matched: \"any\"). Results are notes, best first, each with its most relevant lines (line 0 = file name match). Search again with synonyms or another language if nothing useful comes back, then call read_note on the best paths before answering.",
       inputSchema: {
         vault: vaultArg,
-        query: z.string().min(1).describe("Keywords, e.g. \"flat Berlin\" or \"\\\"notary appointment\\\" Wohnung\". A regular expression when regex is true."),
+        query: z.string().min(1).max(MAX_QUERY_CHARS).describe("Keywords, e.g. \"flat Berlin\" or \"\\\"notary appointment\\\" Wohnung\". A regular expression when regex is true."),
         regex: z.boolean().default(false).describe("Treat query as one regular expression matched line by line."),
         caseSensitive: z.boolean().default(false),
         folder: folderArg,
