@@ -71,3 +71,10 @@ test("an index saved under the old file name is taken over, unless another vault
   assert.strictEqual(other.notes.size, 0);
   assert.notStrictEqual(other.file, alone.file);
 });
+
+test("an unreadable note doesn't make the whole search fail", { skip: process.getuid?.() === 0 }, async () => {
+  const vault = tempVault({ "A.md": "hello\n", "B.md": "hello\n" });
+  fs.chmodSync(path.join(vault.root, "B.md"), 0);
+  const r = await searchNotes(vault, { query: "hello", limit: 20 });
+  assert.deepStrictEqual(r.results.map((n) => n.path), ["A.md"]);
+});

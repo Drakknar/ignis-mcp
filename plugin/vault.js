@@ -452,7 +452,8 @@ async function searchNotes(vault, opts) {
 
     const present = new Set(findAll([file.rel])[0]);
     const lines = present.size ? [{ line: 0, text: "(file name match)", hits: present.size }] : [];
-    const text = stat.size <= MAX_SEARCH_FILE_BYTES ? await readIfExists(file.abs) : null;
+    // A note that can't be read (permissions, I/O error) is left out of the results instead of failing the search.
+    const text = stat.size <= MAX_SEARCH_FILE_BYTES ? await readIfExists(file.abs).catch(() => null) : null;
 
     if (text !== null) {
       const content = text.split(/\r?\n/);
