@@ -38,6 +38,15 @@ test("the regex time budget is shared by all files of a search", () => {
   assert.ok(Date.now() - start < 2000);
 });
 
+test("time between matching calls (reading notes) does not use up the regex budget", async () => {
+  const { findAll } = regexMatcher("a.*z", false, 1000);
+  assert.deepStrictEqual(findAll(["abz"]), [[0]]);
+  await new Promise((r) => setTimeout(r, 1100));
+  // A long note: enough matching work to outlast a budget already spent on waiting.
+  const lines = Array.from({ length: 200000 }, (_, i) => `line ${i} a lot of text without the last letter`);
+  assert.strictEqual(findAll(lines).length, lines.length);
+});
+
 test("vaults whose names differ only in special characters get separate index files", () => {
   const { indexFile } = require("../plugin/semantic");
   assert.notStrictEqual(indexFile("/d", "My Vault", "bge-m3"), indexFile("/d", "My_Vault", "bge-m3"));

@@ -379,14 +379,16 @@ function regexMatcher(query, caseSensitive, budgetMs = REGEX_BUDGET_MS) {
   }
 
   const sandbox = vm.createContext({ re, texts: [], out: [] });
-  const deadline = Date.now() + budgetMs;
+  // Only time spent matching counts: reading the notes between calls (slow on a network share) must not use it up.
+  let leftMs = budgetMs;
 
   // findAll(texts) -> for each text, [0] when it matches, [] otherwise.
   const findAll = (texts) => {
     sandbox.texts = texts;
+    const start = Date.now();
 
     try {
-      REGEX_SCAN.runInContext(sandbox, { timeout: Math.max(1, deadline - Date.now()) });
+      REGEX_SCAN.runInContext(sandbox, { timeout: Math.max(1, leftMs) });
     } catch (e) {
       if (e.code === "ERR_SCRIPT_EXECUTION_TIMEOUT") {
         throw new ToolError(
@@ -396,6 +398,7 @@ function regexMatcher(query, caseSensitive, budgetMs = REGEX_BUDGET_MS) {
 
       throw e;
     } finally {
+      leftMs -= Date.now() - start;
       sandbox.texts = [];
     }
 
