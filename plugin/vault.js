@@ -7,6 +7,9 @@ const MAX_SEARCH_FILE_BYTES = 2 * 1024 * 1024;
 // A regex search may spend at most this long matching, summed over all files. A pattern that backtracks
 // catastrophically (e.g. "(a+)+$") would otherwise block the whole Ignis server, not just this call.
 const REGEX_BUDGET_MS = 3000;
+// Every keyword is looked up in every line, so a huge query (thousands of words) would block the server for many
+// seconds per note. Far more than "a few short keywords".
+const MAX_QUERY_CHARS = 1000;
 
 class ToolError extends Error {}
 
@@ -405,6 +408,10 @@ function regexMatcher(query, caseSensitive, budgetMs = REGEX_BUDGET_MS) {
 
 // Returns the parsed terms and a findAll(texts) giving, for each text, the indexes of the terms present in it.
 function buildMatcher(query, { regex, caseSensitive }) {
+  if (query.length > MAX_QUERY_CHARS) {
+    throw new ToolError(`The query is too long (${query.length} characters, at most ${MAX_QUERY_CHARS}). Use a few short keywords.`);
+  }
+
   if (regex) {
     return regexMatcher(query, caseSensitive);
   }
@@ -674,6 +681,7 @@ function normalizeExtensions(exts) {
 
 module.exports = {
   MAX_SEARCH_FILE_BYTES,
+  MAX_QUERY_CHARS,
   regexMatcher,
   FRONTMATTER,
   ToolError,

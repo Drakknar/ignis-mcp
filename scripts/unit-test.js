@@ -78,3 +78,10 @@ test("an unreadable note doesn't make the whole search fail", { skip: process.ge
   const r = await searchNotes(vault, { query: "hello", limit: 20 });
   assert.deepStrictEqual(r.results.map((n) => n.path), ["A.md"]);
 });
+
+test("an oversized search query is refused", async () => {
+  const { MAX_QUERY_CHARS } = require("../plugin/vault");
+  const vault = tempVault({ "A.md": "hello\n" });
+  const query = Array.from({ length: MAX_QUERY_CHARS }, (_, i) => `w${i}`).join(" ");
+  await assert.rejects(searchNotes(vault, { query, limit: 20 }), ToolError);
+});
