@@ -1,8 +1,12 @@
 const fs = require("fs");
 const path = require("path");
+const vm = require("vm");
 
 const MAX_READ_BYTES = 1024 * 1024;
 const MAX_SEARCH_FILE_BYTES = 2 * 1024 * 1024;
+// A regex search may spend at most this long matching, summed over all files. A pattern that backtracks
+// catastrophically (e.g. "(a+)+$") would otherwise block the whole Ignis server, not just this call.
+const REGEX_BUDGET_MS = 3000;
 
 class ToolError extends Error {}
 
@@ -356,18 +360,53 @@ function parseTerms(query, caseSensitive) {
   return [...new Set(terms)];
 }
 
-// Returns the parsed terms and a find(text) giving the indexes of the terms present in it.
-function buildMatcher(query, { regex, caseSensitive }) {
-  if (regex) {
-    let re;
+// Matching runs in a vm context with a timeout: V8 interrupts a running regex there, so a pathological pattern
+// costs at most REGEX_BUDGET_MS per search instead of hanging the server.
+const REGEX_SCAN = new vm.Script(
+  "out = []; for (let i = 0; i < texts.length; i++) { if (re.test(texts[i])) out.push(i); }",
+);
+
+function regexMatcher(query, caseSensitive, budgetMs = REGEX_BUDGET_MS) {
+  let re;
+
+  try {
+    re = new RegExp(query, caseSensitive ? "" : "i");
+  } catch (e) {
+    throw new ToolError(`Invalid regex: ${e.message}`);
+  }
+
+  const sandbox = vm.createContext({ re, texts: [], out: [] });
+  const deadline = Date.now() + budgetMs;
+
+  // findAll(texts) -> for each text, [0] when it matches, [] otherwise.
+  const findAll = (texts) => {
+    sandbox.texts = texts;
 
     try {
-      re = new RegExp(query, caseSensitive ? "" : "i");
+      REGEX_SCAN.runInContext(sandbox, { timeout: Math.max(1, deadline - Date.now()) });
     } catch (e) {
-      throw new ToolError(`Invalid regex: ${e.message}`);
+      if (e.code === "ERR_SCRIPT_EXECUTION_TIMEOUT") {
+        throw new ToolError(
+          "The regular expression took too long to match (it may backtrack heavily, e.g. nested quantifiers like (a+)+). Simplify it, narrow the folder, or search with keywords instead.",
+        );
+      }
+
+      throw e;
+    } finally {
+      sandbox.texts = [];
     }
 
-    return { terms: [query], find: (text) => (re.test(text) ? [0] : []) };
+    const hits = new Set(sandbox.out);
+    return texts.map((_, i) => (hits.has(i) ? [0] : []));
+  };
+
+  return { terms: [query], findAll };
+}
+
+// Returns the parsed terms and a findAll(texts) giving, for each text, the indexes of the terms present in it.
+function buildMatcher(query, { regex, caseSensitive }) {
+  if (regex) {
+    return regexMatcher(query, caseSensitive);
   }
 
   const terms = parseTerms(query, caseSensitive);
@@ -376,21 +415,20 @@ function buildMatcher(query, { regex, caseSensitive }) {
     throw new ToolError("The query has no searchable words");
   }
 
-  return {
-    terms,
-    find: (text) => {
-      const hay = caseSensitive ? text : text.toLowerCase();
-      const found = [];
+  const find = (text) => {
+    const hay = caseSensitive ? text : text.toLowerCase();
+    const found = [];
 
-      terms.forEach((t, i) => {
-        if (hay.includes(t)) {
-          found.push(i);
-        }
-      });
+    terms.forEach((t, i) => {
+      if (hay.includes(t)) {
+        found.push(i);
+      }
+    });
 
-      return found;
-    },
+    return found;
   };
+
+  return { terms, findAll: (texts) => texts.map(find) };
 }
 
 // Keyword search over whole notes: every word must appear somewhere in the note (file name
@@ -398,7 +436,7 @@ function buildMatcher(query, { regex, caseSensitive }) {
 async function searchNotes(vault, opts) {
   const base = resolveReadable(vault, opts.folder);
   const exts = normalizeExtensions(opts.extensions) || [".md"];
-  const { terms, find } = buildMatcher(opts.query, opts);
+  const { terms, findAll } = buildMatcher(opts.query, opts);
   const notes = [];
 
   for await (const file of walk(base.abs, vault.root)) {
@@ -412,15 +450,16 @@ async function searchNotes(vault, opts) {
       continue;
     }
 
-    const present = new Set(find(file.rel));
+    const present = new Set(findAll([file.rel])[0]);
     const lines = present.size ? [{ line: 0, text: "(file name match)", hits: present.size }] : [];
     const text = stat.size <= MAX_SEARCH_FILE_BYTES ? await readIfExists(file.abs) : null;
 
     if (text !== null) {
       const content = text.split(/\r?\n/);
+      const foundPerLine = findAll(content);
 
       for (let i = 0; i < content.length; i++) {
-        const found = find(content[i]);
+        const found = foundPerLine[i];
 
         if (found.length) {
           found.forEach((t) => present.add(t));
@@ -634,6 +673,7 @@ function normalizeExtensions(exts) {
 
 module.exports = {
   MAX_SEARCH_FILE_BYTES,
+  regexMatcher,
   FRONTMATTER,
   ToolError,
   defaultVault,

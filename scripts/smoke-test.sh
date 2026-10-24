@@ -5,6 +5,10 @@
 set -euo pipefail
 
 image=${1:?usage: smoke-test.sh <image>}
+
+echo "plugin unit tests"
+node --test "$(dirname "$0")/unit-test.js"
+
 port=18080
 embed_port=18434
 token=smoke-test-token
@@ -126,6 +130,12 @@ call search_notes '{"query":"\"here is needle\""}' | jq -e '.structuredContent.r
 
 echo "search_notes regex"
 call search_notes '{"query":"^Nothing to","regex":true}' | jq -e '[.structuredContent.results[].path] == ["Projects/Plan.md"]' >/dev/null
+
+echo "search_notes stops a catastrophically backtracking regex, and the server keeps answering"
+printf '%s!\n' "$(printf 'a%.0s' $(seq 40))" > "$vault/Projects/Backtrack.md"
+call search_notes '{"query":"(a+)+$","regex":true}' | jq -e '.isError == true' >/dev/null
+call read_note '{"path":"Welcome.md"}' | jq -e '.structuredContent.content | contains("needle")' >/dev/null
+rm "$vault/Projects/Backtrack.md"
 
 echo "semantic_search matches by meaning, best passage first"
 call semantic_search '{"query":"when was the heater serviced?"}' \
