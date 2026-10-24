@@ -118,3 +118,44 @@ test("utf8CutPoint only moves back over an incomplete last character", () => {
   assert.deepStrictEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => utf8CutPoint(b, n)), [1, 1, 3, 3, 3, 6, 6, 6, 6, 10]);
   assert.strictEqual(utf8CutPoint(Buffer.alloc(0), 0), 0);
 });
+
+test("a folder swapped for a symlink out of the vault during a write is caught", async () => {
+  const { updateNote } = require("../plugin/vault");
+  const vault = tempVault({ "Notes/A.md": "old\n" });
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ignis-mcp-outside-")));
+
+  await assert.rejects(
+    updateNote(vault, "Notes/B.md", null, () => {
+      fs.renameSync(path.join(vault.root, "Notes"), path.join(vault.root, "Notes.old"));
+      fs.symlinkSync(outside, path.join(vault.root, "Notes"));
+      return "new\n";
+    }),
+    ToolError,
+  );
+  assert.deepStrictEqual(fs.readdirSync(outside), []);
+});
+
+test("a note swapped for a symlink during a write is not followed", async () => {
+  const { updateNote } = require("../plugin/vault");
+  const vault = tempVault({ "A.md": "old\n", "B.md": "other\n" });
+
+  await assert.rejects(
+    updateNote(vault, "A.md", null, () => {
+      fs.unlinkSync(path.join(vault.root, "A.md"));
+      fs.symlinkSync(path.join(vault.root, "B.md"), path.join(vault.root, "A.md"));
+      return "new\n";
+    }),
+    ToolError,
+  );
+  assert.strictEqual(fs.readFileSync(path.join(vault.root, "B.md"), "utf-8"), "other\n");
+});
+
+test("writes still create folders, notes and overwrite as before", async () => {
+  const { writeNote } = require("../plugin/vault");
+  const vault = tempVault({ "A.md": "old\n" });
+  assert.strictEqual((await writeNote(vault, "New/Deep/C", "hi\n", "create", null)).created, true);
+  assert.strictEqual(fs.readFileSync(path.join(vault.root, "New/Deep/C.md"), "utf-8"), "hi\n");
+  await writeNote(vault, "A.md", "replaced\n", "overwrite", null);
+  assert.strictEqual(fs.readFileSync(path.join(vault.root, "A.md"), "utf-8"), "replaced\n");
+  await assert.rejects(writeNote(vault, "A.md", "x", "create", null), ToolError);
+});

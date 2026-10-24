@@ -618,6 +618,15 @@ async function readIfExists(abs) {
   }
 }
 
+// The path was checked before the lock was taken; a folder on the way could have been swapped for a symlink since
+// (directly on the share, not via MCP). Checked again once the folders exist, just before writing, and the note
+// itself is opened without following a symlink. Best effort: this narrows the window, it can't close it.
+function recheckWritable(vault, relPath, allowed, file) {
+  if (resolveWritable(vault, relPath, allowed).abs !== file.abs) {
+    throw new ToolError(`The path changed while writing (a folder was moved or replaced): ${file.rel}`);
+  }
+}
+
 // The one way notes are changed: checks the path, then, under the note's lock, reads it (null = missing), lets
 // change(existing) return the new text and writes it. A new note is created exclusively, never over a file that
 // appeared in the meantime.
@@ -630,7 +639,16 @@ async function updateNote(vault, relPath, allowed, change) {
       const next = await change(existing, file);
 
       await fs.promises.mkdir(path.dirname(file.abs), { recursive: true });
-      await fs.promises.writeFile(file.abs, next, { encoding: "utf-8", flag: existing === null ? "wx" : "w" });
+      recheckWritable(vault, relPath, allowed, file);
+
+      const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | (existing === null ? fs.constants.O_EXCL : fs.constants.O_TRUNC);
+      const handle = await fs.promises.open(file.abs, flags | (fs.constants.O_NOFOLLOW || 0), 0o666);
+
+      try {
+        await handle.writeFile(next, "utf-8");
+      } finally {
+        await handle.close();
+      }
 
       return { path: file.rel, created: existing === null, bytes: Buffer.byteLength(next) };
     } catch (e) {
@@ -640,6 +658,10 @@ async function updateNote(vault, relPath, allowed, change) {
 
       if (e.code === "EISDIR" || e.code === "ENOTDIR") {
         throw new ToolError(`Not a note: ${file.rel}`);
+      }
+
+      if (e.code === "ELOOP") {
+        throw new ToolError(`The note was replaced by a symlink while writing: ${file.rel}`);
       }
 
       throw e;
