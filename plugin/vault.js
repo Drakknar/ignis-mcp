@@ -314,6 +314,23 @@ async function listNotes(vault, { folder, extensions, limit }) {
   return { notes, truncated };
 }
 
+// Where to cut buf[0..len) so it doesn't end inside a multi-byte UTF-8 character: if the last character is
+// incomplete, the cut moves back to its first byte.
+function utf8CutPoint(buf, len) {
+  let i = len - 1;
+
+  while (i >= 0 && i > len - 4 && (buf[i] & 0xc0) === 0x80) {
+    i--;
+  }
+
+  if (i < 0 || buf[i] < 0xc0) {
+    return len;
+  }
+
+  const size = buf[i] >= 0xf0 ? 4 : buf[i] >= 0xe0 ? 3 : 2;
+  return i + size > len ? i : len;
+}
+
 async function readNote(vault, relPath) {
   const file = resolveReadable(vault, relPath);
   let stat;
@@ -333,12 +350,14 @@ async function readNote(vault, relPath) {
   try {
     const length = Math.min(stat.size, MAX_READ_BYTES);
     const buf = Buffer.alloc(length);
-    await handle.read(buf, 0, length, 0);
+    const { bytesRead } = await handle.read(buf, 0, length, 0);
+    const truncated = stat.size > MAX_READ_BYTES;
+    const end = truncated ? utf8CutPoint(buf, bytesRead) : bytesRead;
 
     return {
       path: file.rel,
-      content: buf.toString("utf-8"),
-      truncated: stat.size > MAX_READ_BYTES,
+      content: buf.toString("utf-8", 0, end),
+      truncated,
       modified: stat.mtime.toISOString(),
     };
   } finally {
@@ -697,6 +716,7 @@ module.exports = {
   walk,
   listNotes,
   readNote,
+  utf8CutPoint,
   searchNotes,
   updateNote,
   writeNote,

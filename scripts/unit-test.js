@@ -94,3 +94,27 @@ test("an oversized search query is refused", async () => {
   const query = Array.from({ length: MAX_QUERY_CHARS }, (_, i) => `w${i}`).join(" ");
   await assert.rejects(searchNotes(vault, { query, limit: 20 }), ToolError);
 });
+
+test("a truncated read_note doesn't end in a broken multi-byte character", async () => {
+  const { readNote } = require("../plugin/vault");
+  const max = 1024 * 1024;
+
+  for (const ch of ["é", "€", "😀"]) {
+    const vault = tempVault({ "Big.md": `${"a".repeat(max - 1)}${ch}tail` });
+    const r = await readNote(vault, "Big.md");
+    assert.strictEqual(r.truncated, true);
+    assert.strictEqual(r.content, "a".repeat(max - 1));
+  }
+
+  // A character that ends exactly at the limit is kept.
+  const vault = tempVault({ "Big.md": `${"a".repeat(max - 2)}éz` });
+  const r = await readNote(vault, "Big.md");
+  assert.strictEqual(r.content, `${"a".repeat(max - 2)}é`);
+});
+
+test("utf8CutPoint only moves back over an incomplete last character", () => {
+  const { utf8CutPoint } = require("../plugin/vault");
+  const b = Buffer.from("aé€😀", "utf-8"); // 1 + 2 + 3 + 4 bytes
+  assert.deepStrictEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => utf8CutPoint(b, n)), [1, 1, 3, 3, 3, 6, 6, 6, 6, 10]);
+  assert.strictEqual(utf8CutPoint(Buffer.alloc(0), 0), 0);
+});
