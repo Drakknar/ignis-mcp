@@ -37,3 +37,37 @@ test("the regex time budget is shared by all files of a search", () => {
   assert.throws(() => findAll([`${"a".repeat(40)}!`]), ToolError);
   assert.ok(Date.now() - start < 2000);
 });
+
+test("vaults whose names differ only in special characters get separate index files", () => {
+  const { indexFile } = require("../plugin/semantic");
+  assert.notStrictEqual(indexFile("/d", "My Vault", "bge-m3"), indexFile("/d", "My_Vault", "bge-m3"));
+  assert.notStrictEqual(indexFile("/d", "Notes", "bge-m3:latest"), indexFile("/d", "Notes", "bge-m3_latest"));
+  assert.strictEqual(indexFile("/d", "Notes", "bge-m3"), indexFile("/d", "Notes", "bge-m3"));
+});
+
+test("an index saved under the old file name is taken over, unless another vault shares that name", async () => {
+  const { VaultIndex } = require("../plugin/semantic");
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "ignis-mcp-data-"));
+  const cfg = { model: "m" };
+  const vec = Buffer.from(new Float32Array([1, 0]).buffer).toString("base64");
+  const legacy = { version: 1, model: "m", notes: { "A.md": { mtimeMs: 1, size: 1, chunks: [{ line: 1, heading: "", excerpt: "", vec }] } } };
+  const legacyPath = path.join(dataDir, "semantic-My_Vault-m.json");
+  const log = () => {};
+
+  fs.writeFileSync(legacyPath, JSON.stringify(legacy));
+  const shared = new VaultIndex({ id: "My Vault", root: "/x" }, cfg, dataDir, log, () => ["My Vault", "My_Vault"]);
+  await shared.load();
+  assert.strictEqual(shared.notes.size, 0);
+  assert.ok(fs.existsSync(legacyPath));
+
+  const alone = new VaultIndex({ id: "My Vault", root: "/x" }, cfg, dataDir, log, () => ["My Vault"]);
+  await alone.load();
+  assert.deepStrictEqual([...alone.notes.keys()], ["A.md"]);
+  assert.ok(!fs.existsSync(legacyPath) && fs.existsSync(alone.file));
+
+  // The other vault no longer sees that index.
+  const other = new VaultIndex({ id: "My_Vault", root: "/y" }, cfg, dataDir, log, () => ["My Vault", "My_Vault"]);
+  await other.load();
+  assert.strictEqual(other.notes.size, 0);
+  assert.notStrictEqual(other.file, alone.file);
+});
