@@ -211,16 +211,18 @@ verified_only() {
 	jq -e --arg re '^[0-9]+(\.[0-9]+){0,3}$' "$versions | all(test(\$re))" <<<"$staged" >/dev/null
 }
 
-# Merges a pull request that verified_only passed. GitHub can refuse for a few
+# Merges a pull request that verified_only passed once main's required checks
+# pass (auto-merge; the repository deletes the branch on merge). Without
+# required checks GitHub refuses auto-merge for a pull request that can already
+# be merged, so that one is merged directly. GitHub can also refuse for a few
 # seconds while it computes mergeability, so it retries; if it still can't, the
 # pull request stays open for a person.
 auto_merge() {
-	local pr_url=$1 branch=$2 attempt
+	local pr_url=$1 attempt
 	for attempt in 1 2 3; do
 		sleep $((attempt * 5))
-		if gh pr merge "$pr_url" -R "$repo" --squash; then
-			gh pr comment "$pr_url" -R "$repo" --body "Merged automatically: the review found nothing to change, and the only change is \`verified\` in module.json." >/dev/null
-			gh api -X DELETE "repos/$repo/git/refs/heads/$branch" >/dev/null 2>&1 || true
+		if gh pr merge "$pr_url" -R "$repo" --squash --auto || gh pr merge "$pr_url" -R "$repo" --squash; then
+			gh pr comment "$pr_url" -R "$repo" --body "Merging automatically once the required checks pass: the review found nothing to change, and the only change is \`verified\` in module.json." >/dev/null
 			return 0
 		fi
 	done
