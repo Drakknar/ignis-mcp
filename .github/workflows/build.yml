@@ -48,6 +48,7 @@ jobs:
           GHCR_CREDS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
           PLUGIN_HASH: ${{ hashFiles('Dockerfile', 'plugin/**') }}
         run: |
+          # shellcheck disable=SC2153 # IMAGE and UPSTREAM come from the workflow env
           set -euo pipefail
           image="${IMAGE,,}"
           upstream=$(skopeo inspect --raw "docker://$UPSTREAM" | sha256sum | cut -d' ' -f1)
@@ -55,9 +56,11 @@ jobs:
           key="$upstream/$PLUGIN_HASH"
           current=$(skopeo inspect --creds "$GHCR_CREDS" "docker://$image:latest" 2>/dev/null \
             | jq -r '.Labels["net.stefanopignataro.build-key"] // ""' || true)
-          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
-          echo "key=$key" >> "$GITHUB_OUTPUT"
-          echo "image=$image" >> "$GITHUB_OUTPUT"
+          {
+            echo "upstream=$upstream"
+            echo "key=$key"
+            echo "image=$image"
+          } >> "$GITHUB_OUTPUT"
           if [ "${current%%/*}" = "$upstream" ]; then
             echo "upstream_changed=false" >> "$GITHUB_OUTPUT"
           else
@@ -186,6 +189,7 @@ jobs:
           GHCR_CREDS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
           FAILING: ${{ needs.build.outputs.upstream }}
         run: |
+          # shellcheck disable=SC2153 # IMAGE and UPSTREAM come from the workflow env
           set -euo pipefail
           job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" \
             --jq '.jobs[] | select(.name == "build") | .id')
