@@ -33,7 +33,9 @@
 #   WATCH_SECRET    the Claude token. If the verdict or the diff contains it, or
 #                   a piece of it, nothing is published (see leaks below)
 #
-# Needs GH_TOKEN and the standard GITHUB_* variables.
+# Needs GH_TOKEN and the standard GITHUB_* variables. WATCH_ACTIONS_TOKEN, if
+# set, is used instead for starting and watching the WATCH_DISPATCH run, so
+# GH_TOKEN can be a token without access to Actions (the review App's).
 set -euo pipefail
 
 STATE_BRANCH=watch-state
@@ -160,11 +162,11 @@ leaks() {
 # result on the pull request. A failed check turns the pull request into a draft.
 # Runs started by the Actions token send no failure email, hence the comment.
 verify_branch() {
-	local branch=$1 pr_url=$2 run_id="" url
-	gh workflow run "$WATCH_DISPATCH" -R "$repo" --ref "$branch" -f force=true
+	local branch=$1 pr_url=$2 run_id="" url actions_token=${WATCH_ACTIONS_TOKEN:-$GH_TOKEN}
+	GH_TOKEN=$actions_token gh workflow run "$WATCH_DISPATCH" -R "$repo" --ref "$branch" -f force=true
 	for _ in $(seq 24); do
 		sleep 5
-		run_id=$(gh run list -R "$repo" --workflow "$WATCH_DISPATCH" --branch "$branch" --event workflow_dispatch \
+		run_id=$(GH_TOKEN=$actions_token gh run list -R "$repo" --workflow "$WATCH_DISPATCH" --branch "$branch" --event workflow_dispatch \
 			--limit 1 --json databaseId --jq '.[0].databaseId // ""')
 		[ -n "$run_id" ] && break
 	done
@@ -174,9 +176,9 @@ verify_branch() {
 	fi
 	url="$GITHUB_SERVER_URL/$repo/actions/runs/$run_id"
 	echo "Verification run: $url"
-	if timeout 55m gh run watch "$run_id" -R "$repo" --interval 30 --exit-status >/dev/null 2>&1; then
+	if GH_TOKEN=$actions_token timeout 55m gh run watch "$run_id" -R "$repo" --interval 30 --exit-status >/dev/null 2>&1; then
 		gh pr comment "$pr_url" -R "$repo" --body "Check passed: \`$WATCH_DISPATCH\` built and tested this branch without publishing ([run]($url))."
-	elif [ "$(gh run view "$run_id" -R "$repo" --json status --jq .status)" != completed ]; then
+	elif [ "$(GH_TOKEN=$actions_token gh run view "$run_id" -R "$repo" --json status --jq .status)" != completed ]; then
 		gh pr comment "$pr_url" -R "$repo" --body "\`$WATCH_DISPATCH\` on this branch was still running after 55 minutes ([run]($url)). Check it before merging."
 	else
 		gh pr ready "$pr_url" -R "$repo" --undo >/dev/null 2>&1 || true

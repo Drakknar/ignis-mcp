@@ -304,9 +304,21 @@ jobs:
       pull-requests: write
       actions: write
     steps:
+      # Pull requests opened with the Actions token start no workflows, so their
+      # checks would never run. The review App's token (Contents, Issues and Pull
+      # requests only) opens them instead; the Actions token is kept for
+      # starting the check run on a proposed fix.
+      - name: App token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.REVIEW_APP_CLIENT_ID }}
+          private-key: ${{ secrets.REVIEW_APP_PRIVATE_KEY }}
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.sha }}
+          token: ${{ steps.app.outputs.token }}
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         continue-on-error: true
@@ -318,7 +330,8 @@ jobs:
       # the Claude token. No code from the review runs in this job.
       - name: Open pull request / issues
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          WATCH_ACTIONS_TOKEN: ${{ github.token }}
           WATCH_SECRET: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           WATCH_KEYS: fix:${{ needs.build.outputs.key }}=@
           WATCH_SUBJECT: ${{ env.UPSTREAM }} update
