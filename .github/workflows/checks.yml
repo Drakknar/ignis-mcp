@@ -27,6 +27,38 @@ jobs:
       - name: Build image
         run: docker build --pull -t checks:local .
 
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Ignis's own rules (.oxlintrc.json, .prettierrc), as upstream lints its server code, where this plugin runs.
+      - name: oxlint
+        run: npx --yes oxlint@1.70.0 --max-warnings 0 plugin scripts
+      - name: prettier
+        run: npx --yes prettier@3.6.2 --check "plugin/**/*.{js,json}" "scripts/*.js"
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+      - name: hadolint
+        run: docker run --rm -i hadolint/hadolint:v2.12.0 < Dockerfile
+
+  # Temporary: produces the autofix diff.
+  lint-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          npx --yes prettier@3.6.2 --write "plugin/**/*.{js,json}" "scripts/*.js"
+          npx --yes oxlint@1.70.0 --fix plugin scripts || true
+          npx --yes oxlint@1.70.0 plugin scripts > "$RUNNER_TEMP/oxlint.txt" || true
+          shellcheck -f gcc scripts/*.sh > "$RUNNER_TEMP/shellcheck.txt" || true
+          docker run --rm -i hadolint/hadolint:v2.12.0 < Dockerfile > "$RUNNER_TEMP/hadolint.txt" || true
+          git diff > "$RUNNER_TEMP/lint-fix.patch"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lint-fix
+          path: ${{ runner.temp }}/*.*
+          retention-days: 3
+
   actionlint:
     runs-on: ubuntu-latest
     steps:
