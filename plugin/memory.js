@@ -28,10 +28,12 @@ function noteTitle(title, text) {
   const source =
     (title || "").trim() || text.trim().split(/\s+/).slice(0, 8).join(" ");
 
+  // Characters a file name can't have (NUL and line breaks included).
+  // oxlint-disable-next-line no-control-regex
+  const unsafe = /[/\\:*?"<>|#^[\]\r\n\t\0]+/g;
+
   return source
-    // NUL and line breaks can't be in a file name.
-    // oxlint-disable-next-line no-control-regex
-    .replace(/[/\\:*?"<>|#^[\]\r\n\t\0]+/g, " ")
+    .replace(unsafe, " ")
     .replace(/\s+/g, " ")
     .replace(/^[\s.]+|[\s.,;!]+$/g, "")
     .slice(0, 80)
