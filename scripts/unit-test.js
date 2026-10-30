@@ -7,7 +7,9 @@ const path = require("path");
 const { searchNotes, regexMatcher, ToolError } = require("../plugin/vault");
 
 function tempVault(files) {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ignis-mcp-test-")));
+  const root = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), "ignis-mcp-test-")),
+  );
 
   for (const [rel, text] of Object.entries(files)) {
     fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
@@ -18,16 +20,32 @@ function tempVault(files) {
 }
 
 test("search_notes regex still finds matching lines", async () => {
-  const vault = tempVault({ "A.md": "first\nNothing to see\n", "B.md": "other\n" });
-  const r = await searchNotes(vault, { query: "^nothing to", regex: true, limit: 20 });
-  assert.deepStrictEqual(r.results.map((n) => [n.path, n.lines]), [["A.md", [{ line: 2, text: "Nothing to see" }]]]);
+  const vault = tempVault({
+    "A.md": "first\nNothing to see\n",
+    "B.md": "other\n",
+  });
+  const r = await searchNotes(vault, {
+    query: "^nothing to",
+    regex: true,
+    limit: 20,
+  });
+  assert.deepStrictEqual(
+    r.results.map((n) => [n.path, n.lines]),
+    [["A.md", [{ line: 2, text: "Nothing to see" }]]],
+  );
 });
 
 test("a catastrophically backtracking regex fails fast instead of hanging", async () => {
   const vault = tempVault({ "A.md": `${"a".repeat(40)}!\n` });
   const start = Date.now();
-  await assert.rejects(searchNotes(vault, { query: "(a+)+$", regex: true, limit: 20 }), (e) => e instanceof ToolError);
-  assert.ok(Date.now() - start < 10000, "search should stop within its time budget");
+  await assert.rejects(
+    searchNotes(vault, { query: "(a+)+$", regex: true, limit: 20 }),
+    (e) => e instanceof ToolError,
+  );
+  assert.ok(
+    Date.now() - start < 10000,
+    "search should stop within its time budget",
+  );
 });
 
 test("the regex time budget is shared by all files of a search", () => {
@@ -43,15 +61,27 @@ test("time between matching calls (reading notes) does not use up the regex budg
   assert.deepStrictEqual(findAll(["abz"]), [[0]]);
   await new Promise((r) => setTimeout(r, 1100));
   // A long note: enough matching work to outlast a budget already spent on waiting.
-  const lines = Array.from({ length: 200000 }, (_, i) => `line ${i} a lot of text without the last letter`);
+  const lines = Array.from(
+    { length: 200000 },
+    (_, i) => `line ${i} a lot of text without the last letter`,
+  );
   assert.strictEqual(findAll(lines).length, lines.length);
 });
 
 test("vaults whose names differ only in special characters get separate index files", () => {
   const { indexFile } = require("../plugin/semantic");
-  assert.notStrictEqual(indexFile("/d", "My Vault", "bge-m3"), indexFile("/d", "My_Vault", "bge-m3"));
-  assert.notStrictEqual(indexFile("/d", "Notes", "bge-m3:latest"), indexFile("/d", "Notes", "bge-m3_latest"));
-  assert.strictEqual(indexFile("/d", "Notes", "bge-m3"), indexFile("/d", "Notes", "bge-m3"));
+  assert.notStrictEqual(
+    indexFile("/d", "My Vault", "bge-m3"),
+    indexFile("/d", "My_Vault", "bge-m3"),
+  );
+  assert.notStrictEqual(
+    indexFile("/d", "Notes", "bge-m3:latest"),
+    indexFile("/d", "Notes", "bge-m3_latest"),
+  );
+  assert.strictEqual(
+    indexFile("/d", "Notes", "bge-m3"),
+    indexFile("/d", "Notes", "bge-m3"),
+  );
 });
 
 test("an index saved under the old file name is taken over, unless another vault shares that name", async () => {
@@ -59,39 +89,76 @@ test("an index saved under the old file name is taken over, unless another vault
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "ignis-mcp-data-"));
   const cfg = { model: "m" };
   const vec = Buffer.from(new Float32Array([1, 0]).buffer).toString("base64");
-  const legacy = { version: 1, model: "m", notes: { "A.md": { mtimeMs: 1, size: 1, chunks: [{ line: 1, heading: "", excerpt: "", vec }] } } };
+  const legacy = {
+    version: 1,
+    model: "m",
+    notes: {
+      "A.md": {
+        mtimeMs: 1,
+        size: 1,
+        chunks: [{ line: 1, heading: "", excerpt: "", vec }],
+      },
+    },
+  };
   const legacyPath = path.join(dataDir, "semantic-My_Vault-m.json");
   const log = () => {};
 
   fs.writeFileSync(legacyPath, JSON.stringify(legacy));
-  const shared = new VaultIndex({ id: "My Vault", root: "/x" }, cfg, dataDir, log, () => ["My Vault", "My_Vault"]);
+  const shared = new VaultIndex(
+    { id: "My Vault", root: "/x" },
+    cfg,
+    dataDir,
+    log,
+    () => ["My Vault", "My_Vault"],
+  );
   await shared.load();
   assert.strictEqual(shared.notes.size, 0);
   assert.ok(fs.existsSync(legacyPath));
 
-  const alone = new VaultIndex({ id: "My Vault", root: "/x" }, cfg, dataDir, log, () => ["My Vault"]);
+  const alone = new VaultIndex(
+    { id: "My Vault", root: "/x" },
+    cfg,
+    dataDir,
+    log,
+    () => ["My Vault"],
+  );
   await alone.load();
   assert.deepStrictEqual([...alone.notes.keys()], ["A.md"]);
   assert.ok(!fs.existsSync(legacyPath) && fs.existsSync(alone.file));
 
   // The other vault no longer sees that index.
-  const other = new VaultIndex({ id: "My_Vault", root: "/y" }, cfg, dataDir, log, () => ["My Vault", "My_Vault"]);
+  const other = new VaultIndex(
+    { id: "My_Vault", root: "/y" },
+    cfg,
+    dataDir,
+    log,
+    () => ["My Vault", "My_Vault"],
+  );
   await other.load();
   assert.strictEqual(other.notes.size, 0);
   assert.notStrictEqual(other.file, alone.file);
 });
 
-test("an unreadable note doesn't make the whole search fail", { skip: process.getuid?.() === 0 }, async () => {
-  const vault = tempVault({ "A.md": "hello\n", "B.md": "hello\n" });
-  fs.chmodSync(path.join(vault.root, "B.md"), 0);
-  const r = await searchNotes(vault, { query: "hello", limit: 20 });
-  assert.deepStrictEqual(r.results.map((n) => n.path), ["A.md"]);
-});
+test(
+  "an unreadable note doesn't make the whole search fail",
+  { skip: process.getuid?.() === 0 },
+  async () => {
+    const vault = tempVault({ "A.md": "hello\n", "B.md": "hello\n" });
+    fs.chmodSync(path.join(vault.root, "B.md"), 0);
+    const r = await searchNotes(vault, { query: "hello", limit: 20 });
+    assert.deepStrictEqual(
+      r.results.map((n) => n.path),
+      ["A.md"],
+    );
+  },
+);
 
 test("an oversized search query is refused", async () => {
   const { MAX_QUERY_CHARS } = require("../plugin/vault");
   const vault = tempVault({ "A.md": "hello\n" });
-  const query = Array.from({ length: MAX_QUERY_CHARS }, (_, i) => `w${i}`).join(" ");
+  const query = Array.from({ length: MAX_QUERY_CHARS }, (_, i) => `w${i}`).join(
+    " ",
+  );
   await assert.rejects(searchNotes(vault, { query, limit: 20 }), ToolError);
 });
 
@@ -115,18 +182,26 @@ test("a truncated read_note doesn't end in a broken multi-byte character", async
 test("utf8CutPoint only moves back over an incomplete last character", () => {
   const { utf8CutPoint } = require("../plugin/vault");
   const b = Buffer.from("aé€😀", "utf-8"); // 1 + 2 + 3 + 4 bytes
-  assert.deepStrictEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => utf8CutPoint(b, n)), [1, 1, 3, 3, 3, 6, 6, 6, 6, 10]);
+  assert.deepStrictEqual(
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => utf8CutPoint(b, n)),
+    [1, 1, 3, 3, 3, 6, 6, 6, 6, 10],
+  );
   assert.strictEqual(utf8CutPoint(Buffer.alloc(0), 0), 0);
 });
 
 test("a folder swapped for a symlink out of the vault during a write is caught", async () => {
   const { updateNote } = require("../plugin/vault");
   const vault = tempVault({ "Notes/A.md": "old\n" });
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ignis-mcp-outside-")));
+  const outside = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), "ignis-mcp-outside-")),
+  );
 
   await assert.rejects(
     updateNote(vault, "Notes/B.md", null, () => {
-      fs.renameSync(path.join(vault.root, "Notes"), path.join(vault.root, "Notes.old"));
+      fs.renameSync(
+        path.join(vault.root, "Notes"),
+        path.join(vault.root, "Notes.old"),
+      );
       fs.symlinkSync(outside, path.join(vault.root, "Notes"));
       return "new\n";
     }),
@@ -142,20 +217,38 @@ test("a note swapped for a symlink during a write is not followed", async () => 
   await assert.rejects(
     updateNote(vault, "A.md", null, () => {
       fs.unlinkSync(path.join(vault.root, "A.md"));
-      fs.symlinkSync(path.join(vault.root, "B.md"), path.join(vault.root, "A.md"));
+      fs.symlinkSync(
+        path.join(vault.root, "B.md"),
+        path.join(vault.root, "A.md"),
+      );
       return "new\n";
     }),
     ToolError,
   );
-  assert.strictEqual(fs.readFileSync(path.join(vault.root, "B.md"), "utf-8"), "other\n");
+  assert.strictEqual(
+    fs.readFileSync(path.join(vault.root, "B.md"), "utf-8"),
+    "other\n",
+  );
 });
 
 test("writes still create folders, notes and overwrite as before", async () => {
   const { writeNote } = require("../plugin/vault");
   const vault = tempVault({ "A.md": "old\n" });
-  assert.strictEqual((await writeNote(vault, "New/Deep/C", "hi\n", "create", null)).created, true);
-  assert.strictEqual(fs.readFileSync(path.join(vault.root, "New/Deep/C.md"), "utf-8"), "hi\n");
+  assert.strictEqual(
+    (await writeNote(vault, "New/Deep/C", "hi\n", "create", null)).created,
+    true,
+  );
+  assert.strictEqual(
+    fs.readFileSync(path.join(vault.root, "New/Deep/C.md"), "utf-8"),
+    "hi\n",
+  );
   await writeNote(vault, "A.md", "replaced\n", "overwrite", null);
-  assert.strictEqual(fs.readFileSync(path.join(vault.root, "A.md"), "utf-8"), "replaced\n");
-  await assert.rejects(writeNote(vault, "A.md", "x", "create", null), ToolError);
+  assert.strictEqual(
+    fs.readFileSync(path.join(vault.root, "A.md"), "utf-8"),
+    "replaced\n",
+  );
+  await assert.rejects(
+    writeNote(vault, "A.md", "x", "create", null),
+    ToolError,
+  );
 });

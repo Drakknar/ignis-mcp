@@ -27,6 +27,20 @@ jobs:
       - name: Build image
         run: docker build --pull -t checks:local .
 
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Ignis's own rules (.oxlintrc.json, .prettierrc), as upstream lints its server code, where this plugin runs.
+      - name: oxlint
+        run: npx --yes oxlint@1.70.0 --max-warnings 0 plugin scripts
+      - name: prettier
+        run: npx --yes prettier@3.6.2 --check "plugin/**/*.{js,json}" "scripts/*.js"
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+      - name: hadolint
+        run: docker run --rm -i hadolint/hadolint:v2.12.0 < Dockerfile
+
   actionlint:
     runs-on: ubuntu-latest
     steps:

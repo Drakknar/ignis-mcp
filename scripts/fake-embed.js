@@ -3,11 +3,16 @@
 // Usage: node scripts/fake-embed.js <port>
 const http = require("http");
 
-const SAME = { boiler: "heating", heater: "heating", inspection: "service", serviced: "service" };
+const SAME = {
+  boiler: "heating",
+  heater: "heating",
+  inspection: "service",
+  serviced: "service",
+};
 const DIMS = 1024;
 
 function embed(text) {
-  const v = new Array(DIMS).fill(0);
+  const v = Array.from({ length: DIMS }, () => 0);
 
   for (let w of text.toLowerCase().match(/[a-z]+/g) || []) {
     w = SAME[w] || w;
@@ -37,7 +42,9 @@ http
       }
 
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ model, embeddings: [].concat(input).map(embed) }));
+      res.end(
+        JSON.stringify({ model, embeddings: [].concat(input).map(embed) }),
+      );
     });
   })
   .listen(Number(process.argv[2]), "0.0.0.0");

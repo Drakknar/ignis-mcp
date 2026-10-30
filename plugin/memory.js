@@ -9,7 +9,10 @@ const MEMORY_TYPES = ["fact", "preference", "episode", "procedure"];
 function memoryConfig(env = process.env) {
   return {
     vault: (env.MCP_MEMORY_VAULT || "").trim() || defaultVault(env),
-    inbox: ((env.MCP_MEMORY_INBOX || "").trim() || "Inbox").replace(/^\/+|\/+$/g, ""),
+    inbox: ((env.MCP_MEMORY_INBOX || "").trim() || "Inbox").replace(
+      /^\/+|\/+$/g,
+      "",
+    ),
   };
 }
 
@@ -22,10 +25,15 @@ function today(now = new Date()) {
 // A usable file name: no path (either slash: paths treat "\" as "/") or Obsidian link characters, no leading dots,
 // at most 80 characters.
 function noteTitle(title, text) {
-  const source = (title || "").trim() || text.trim().split(/\s+/).slice(0, 8).join(" ");
+  const source =
+    (title || "").trim() || text.trim().split(/\s+/).slice(0, 8).join(" ");
+
+  // Characters a file name can't have (NUL and line breaks included).
+  // oxlint-disable-next-line no-control-regex
+  const unsafe = /[/\\:*?"<>|#^[\]\r\n\t\0]+/g;
 
   return source
-    .replace(/[\/\\:*?"<>|#^[\]\r\n\t\0]+/g, " ")
+    .replace(unsafe, " ")
     .replace(/\s+/g, " ")
     .replace(/^[\s.]+|[\s.,;!]+$/g, "")
     .slice(0, 80)
@@ -62,7 +70,9 @@ function setFrontmatter(text, fields) {
       entries[first] = { key: k, lines: [`${k}: ${v}`], keep: true };
     }
 
-    entries = entries.filter((e) => e.key !== k || e.keep).map(({ keep, ...e }) => e);
+    entries = entries
+      .filter((e) => e.key !== k || e.keep)
+      .map(({ keep, ...e }) => e);
 
     if (v !== null && first < 0) {
       entries.push({ key: k, lines: [`${k}: ${v}`] });
@@ -85,16 +95,30 @@ async function remember(vault, { text, title, type, source }, allowed) {
 
   // Same title: add to the existing memory instead of making a near-duplicate. New information makes it current
   // again and puts it back up for review, even if it had been forgotten.
-  const result = await updateNote(vault, `${memoryConfig().inbox}/${name}.md`, allowed, (existing) => {
-    if (existing === null) {
-      return `${setFrontmatter("", { type, source: yamlString(source || "assistant"), date, status: "inbox" })}# ${name}\n\n${body}\n`;
-    }
+  const result = await updateNote(
+    vault,
+    `${memoryConfig().inbox}/${name}.md`,
+    allowed,
+    (existing) => {
+      if (existing === null) {
+        return `${setFrontmatter("", { type, source: yamlString(source || "assistant"), date, status: "inbox" })}# ${name}\n\n${body}\n`;
+      }
 
-    const current = setFrontmatter(existing, { date, status: "inbox", outdated_on: null, outdated_reason: null });
-    return `${current}${current.endsWith("\n") ? "" : "\n"}\n## Update ${date}\n\n${body}\n`;
-  });
+      const current = setFrontmatter(existing, {
+        date,
+        status: "inbox",
+        outdated_on: null,
+        outdated_reason: null,
+      });
+      return `${current}${current.endsWith("\n") ? "" : "\n"}\n## Update ${date}\n\n${body}\n`;
+    },
+  );
 
-  return { ...result, vault: vault.id, ...(result.created ? {} : { updated: true }) };
+  return {
+    ...result,
+    vault: vault.id,
+    ...(result.created ? {} : { updated: true }),
+  };
 }
 
 async function forget(vault, { path, reason }, allowed) {
@@ -103,10 +127,22 @@ async function forget(vault, { path, reason }, allowed) {
       throw new ToolError(`Note not found: ${file.rel}`);
     }
 
-    return setFrontmatter(existing, { status: "outdated", outdated_on: today(), outdated_reason: yamlString(reason) });
+    return setFrontmatter(existing, {
+      status: "outdated",
+      outdated_on: today(),
+      outdated_reason: yamlString(reason),
+    });
   });
 
   return { ...result, vault: vault.id, status: "outdated" };
 }
 
-module.exports = { MEMORY_TYPES, memoryConfig, noteTitle, setFrontmatter, today, remember, forget };
+module.exports = {
+  MEMORY_TYPES,
+  memoryConfig,
+  noteTitle,
+  setFrontmatter,
+  today,
+  remember,
+  forget,
+};

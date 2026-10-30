@@ -79,7 +79,9 @@ function expandBraces(entry) {
   const out = [];
 
   for (let i = 0; i < bounds.length - 1; i++) {
-    out.push(...expandBraces(head + entry.slice(bounds[i] + 1, bounds[i + 1]) + tail));
+    out.push(
+      ...expandBraces(head + entry.slice(bounds[i] + 1, bounds[i + 1]) + tail),
+    );
   }
 
   return out;
@@ -88,7 +90,10 @@ function expandBraces(entry) {
 // "Vault/./Inbox/" -> "Vault/Inbox", so harmless spellings in the setting still match. An entry with ".." is
 // dropped (fails closed) rather than resolved, so "Agents/../Other" never grants another vault.
 function normalizeEntry(entry) {
-  const p = entry.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  const p = entry
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "");
 
   if (p === "*" || !p) {
     return p;
@@ -127,7 +132,10 @@ function isWritable(vaultId, rel, allowed = writePaths()) {
   return allowed.some((entry) => {
     const [v, ...rest] = entry.split("/");
     const folder = rest.join("/");
-    return v === vaultId && (!folder || rel === folder || rel.startsWith(`${folder}/`));
+    return (
+      v === vaultId &&
+      (!folder || rel === folder || rel.startsWith(`${folder}/`))
+    );
   });
 }
 
@@ -431,7 +439,9 @@ function regexMatcher(query, caseSensitive, budgetMs = REGEX_BUDGET_MS) {
 // Returns the parsed terms and a findAll(texts) giving, for each text, the indexes of the terms present in it.
 function buildMatcher(query, { regex, caseSensitive }) {
   if (query.length > MAX_QUERY_CHARS) {
-    throw new ToolError(`The query is too long (${query.length} characters, at most ${MAX_QUERY_CHARS}). Use a few short keywords.`);
+    throw new ToolError(
+      `The query is too long (${query.length} characters, at most ${MAX_QUERY_CHARS}). Use a few short keywords.`,
+    );
   }
 
   if (regex) {
@@ -480,9 +490,14 @@ async function searchNotes(vault, opts) {
     }
 
     const present = new Set(findAll([file.rel])[0]);
-    const lines = present.size ? [{ line: 0, text: "(file name match)", hits: present.size }] : [];
+    const lines = present.size
+      ? [{ line: 0, text: "(file name match)", hits: present.size }]
+      : [];
     // A note that can't be read (permissions, I/O error) is left out of the results instead of failing the search.
-    const text = stat.size <= MAX_SEARCH_FILE_BYTES ? await readIfExists(file.abs).catch(() => null) : null;
+    const text =
+      stat.size <= MAX_SEARCH_FILE_BYTES
+        ? await readIfExists(file.abs).catch(() => null)
+        : null;
 
     if (text !== null) {
       const content = text.split(/\r?\n/);
@@ -493,7 +508,11 @@ async function searchNotes(vault, opts) {
 
         if (found.length) {
           found.forEach((t) => present.add(t));
-          lines.push({ line: i + 1, text: content[i].trim().slice(0, 300), hits: found.length });
+          lines.push({
+            line: i + 1,
+            text: content[i].trim().slice(0, 300),
+            hits: found.length,
+          });
         }
       }
     }
@@ -504,8 +523,12 @@ async function searchNotes(vault, opts) {
   }
 
   // Rarer words weigh more, so "to" or "the" can't outrank "Wohnung".
-  const docFreq = terms.map((_, i) => notes.filter((n) => n.present.has(i)).length);
-  const weight = docFreq.map((df) => Math.log(1 + (notes.length + 1) / (df || 1)));
+  const docFreq = terms.map(
+    (_, i) => notes.filter((n) => n.present.has(i)).length,
+  );
+  const weight = docFreq.map((df) =>
+    Math.log(1 + (notes.length + 1) / (df || 1)),
+  );
 
   let matched = "all";
   let hits = notes.filter((n) => n.present.size === terms.length);
@@ -532,12 +555,19 @@ async function searchNotes(vault, opts) {
       .map(({ line, text }) => ({ line, text })),
   }));
 
-  const result = { terms, matched, results, truncated: scored.length > opts.limit };
+  const result = {
+    terms,
+    matched,
+    results,
+    truncated: scored.length > opts.limit,
+  };
 
   if (results.length === 0) {
-    result.hint = "Nothing matched. Try fewer or different keywords, synonyms, or the language the notes are written in.";
+    result.hint =
+      "Nothing matched. Try fewer or different keywords, synonyms, or the language the notes are written in.";
   } else if (matched === "any") {
-    result.hint = "No note contains every term; these contain some of them, best first.";
+    result.hint =
+      "No note contains every term; these contain some of them, best first.";
   }
 
   return result;
@@ -560,7 +590,9 @@ function insertAfterFrontmatter(existing, content) {
 
 // "Inbox/Idea" and "Inbox/Idea." -> "Inbox/Idea.md"; "Inbox/v1.2 notes" -> "Inbox/v1.2 notes.md"; "x.canvas" stays.
 function notePath(relPath) {
-  const p = String(relPath).replace(/\\/g, "/").replace(/[.\s]+$/, "");
+  const p = String(relPath)
+    .replace(/\\/g, "/")
+    .replace(/[.\s]+$/, "");
   return /\.[A-Za-z0-9]{1,10}$/.test(p.split("/").pop()) ? p : `${p}.md`;
 }
 
@@ -571,7 +603,9 @@ function resolveWritable(vault, relPath, allowed) {
 
   for (const rel of [file.rel, file.realRel]) {
     if (!rel || isHiddenPath(rel)) {
-      throw new ToolError(`Refusing to write to hidden or config path: ${file.rel || "/"}`);
+      throw new ToolError(
+        `Refusing to write to hidden or config path: ${file.rel || "/"}`,
+      );
     }
 
     if (!isWritable(vault.id, rel, allowed)) {
@@ -623,7 +657,9 @@ async function readIfExists(abs) {
 // itself is opened without following a symlink. Best effort: this narrows the window, it can't close it.
 function recheckWritable(vault, relPath, allowed, file) {
   if (resolveWritable(vault, relPath, allowed).abs !== file.abs) {
-    throw new ToolError(`The path changed while writing (a folder was moved or replaced): ${file.rel}`);
+    throw new ToolError(
+      `The path changed while writing (a folder was moved or replaced): ${file.rel}`,
+    );
   }
 }
 
@@ -641,8 +677,15 @@ async function updateNote(vault, relPath, allowed, change) {
       await fs.promises.mkdir(path.dirname(file.abs), { recursive: true });
       recheckWritable(vault, relPath, allowed, file);
 
-      const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | (existing === null ? fs.constants.O_EXCL : fs.constants.O_TRUNC);
-      const handle = await fs.promises.open(file.abs, flags | (fs.constants.O_NOFOLLOW || 0), 0o666);
+      const flags =
+        fs.constants.O_WRONLY |
+        fs.constants.O_CREAT |
+        (existing === null ? fs.constants.O_EXCL : fs.constants.O_TRUNC);
+      const handle = await fs.promises.open(
+        file.abs,
+        flags | (fs.constants.O_NOFOLLOW || 0),
+        0o666,
+      );
 
       try {
         await handle.writeFile(next, "utf-8");
@@ -650,7 +693,11 @@ async function updateNote(vault, relPath, allowed, change) {
         await handle.close();
       }
 
-      return { path: file.rel, created: existing === null, bytes: Buffer.byteLength(next) };
+      return {
+        path: file.rel,
+        created: existing === null,
+        bytes: Buffer.byteLength(next),
+      };
     } catch (e) {
       if (e.code === "EEXIST") {
         throw new ToolError(`Note already exists: ${file.rel}`);
@@ -661,7 +708,9 @@ async function updateNote(vault, relPath, allowed, change) {
       }
 
       if (e.code === "ELOOP") {
-        throw new ToolError(`The note was replaced by a symlink while writing: ${file.rel}`);
+        throw new ToolError(
+          `The note was replaced by a symlink while writing: ${file.rel}`,
+        );
       }
 
       throw e;
@@ -669,7 +718,13 @@ async function updateNote(vault, relPath, allowed, change) {
   });
 }
 
-async function writeNote(vault, relPath, content, mode, allowed = writePaths()) {
+async function writeNote(
+  vault,
+  relPath,
+  content,
+  mode,
+  allowed = writePaths(),
+) {
   return updateNote(vault, relPath, allowed, (existing, file) => {
     if (existing === null) {
       return content;
@@ -680,11 +735,18 @@ async function writeNote(vault, relPath, content, mode, allowed = writePaths()) 
     }
 
     if (mode === "append") {
-      return existing + (existing === "" || existing.endsWith("\n") ? "" : "\n") + content;
+      return (
+        existing +
+        (existing === "" || existing.endsWith("\n") ? "" : "\n") +
+        content
+      );
     }
 
     if (mode === "prepend") {
-      return insertAfterFrontmatter(existing, content.endsWith("\n") ? content : `${content}\n`);
+      return insertAfterFrontmatter(
+        existing,
+        content.endsWith("\n") ? content : `${content}\n`,
+      );
     }
 
     return content;
@@ -692,7 +754,13 @@ async function writeNote(vault, relPath, content, mode, allowed = writePaths()) 
 }
 
 // Replaces one exact passage, so a model can change a line without rewriting (and maybe losing) the rest.
-async function editNote(vault, relPath, oldText, newText, allowed = writePaths()) {
+async function editNote(
+  vault,
+  relPath,
+  oldText,
+  newText,
+  allowed = writePaths(),
+) {
   const result = await updateNote(vault, relPath, allowed, (existing, file) => {
     if (existing === null) {
       throw new ToolError(`Note not found: ${file.rel}`);
@@ -701,11 +769,15 @@ async function editNote(vault, relPath, oldText, newText, allowed = writePaths()
     const count = existing.split(oldText).length - 1;
 
     if (count === 0) {
-      throw new ToolError(`old_text not found in ${file.rel}. Call read_note and copy the passage exactly.`);
+      throw new ToolError(
+        `old_text not found in ${file.rel}. Call read_note and copy the passage exactly.`,
+      );
     }
 
     if (count > 1) {
-      throw new ToolError(`old_text appears ${count} times in ${file.rel}. Include more surrounding text so it is unique.`);
+      throw new ToolError(
+        `old_text appears ${count} times in ${file.rel}. Include more surrounding text so it is unique.`,
+      );
     }
 
     const i = existing.indexOf(oldText);

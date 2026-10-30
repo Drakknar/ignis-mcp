@@ -9,6 +9,8 @@ WORKDIR /plugin
 COPY plugin/package.json ./
 RUN npm install --omit=dev --no-audit --no-fund
 
+# The build workflow passes the exact upstream digest as BASE_IMAGE.
+# hadolint ignore=DL3006
 FROM ${BASE_IMAGE}
 
 ARG PLUGIN_DIR=/app/apps/ignis-server/server/plugins/mcp
