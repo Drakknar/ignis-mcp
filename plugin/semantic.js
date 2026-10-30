@@ -1,7 +1,13 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const { ToolError, walk, resolveReadable, statIfExists, MAX_SEARCH_FILE_BYTES } = require("./vault");
+const {
+  ToolError,
+  walk,
+  resolveReadable,
+  statIfExists,
+  MAX_SEARCH_FILE_BYTES,
+} = require("./vault");
 
 // Search by meaning: notes are split into passages, embedded with an Ollama embedding model and
 // compared with the embedded query. Off unless MCP_EMBED_URL points at an Ollama server.
@@ -62,14 +68,22 @@ async function embed(cfg, inputs, log) {
       signal: AbortSignal.timeout(5 * 60 * 1000),
     });
   } catch (e) {
-    log?.(`Embedding server unreachable at ${cfg.url}: ${e.cause?.message || e.message}`);
-    throw new ToolError("Embedding server unreachable; details are in the Ignis log.");
+    log?.(
+      `Embedding server unreachable at ${cfg.url}: ${e.cause?.message || e.message}`,
+    );
+    throw new ToolError(
+      "Embedding server unreachable; details are in the Ignis log.",
+    );
   }
 
   if (!res.ok) {
     const body = (await res.text().catch(() => "")).slice(0, 300);
-    log?.(`Embedding model "${cfg.model}" at ${cfg.url} failed (${res.status}): ${body}`);
-    throw new ToolError(`Embedding model "${cfg.model}" failed (HTTP ${res.status}); details are in the Ignis log.`);
+    log?.(
+      `Embedding model "${cfg.model}" at ${cfg.url} failed (${res.status}): ${body}`,
+    );
+    throw new ToolError(
+      `Embedding model "${cfg.model}" failed (HTTP ${res.status}); details are in the Ignis log.`,
+    );
   }
 
   const { embeddings } = await res.json().catch(() => ({}));
@@ -77,9 +91,14 @@ async function embed(cfg, inputs, log) {
   if (
     !Array.isArray(embeddings) ||
     embeddings.length !== inputs.length ||
-    !embeddings.every((v) => Array.isArray(v) && v.length > 0 && v.length === embeddings[0].length)
+    !embeddings.every(
+      (v) =>
+        Array.isArray(v) && v.length > 0 && v.length === embeddings[0].length,
+    )
   ) {
-    throw new ToolError(`Embedding model "${cfg.model}" returned an unexpected response`);
+    throw new ToolError(
+      `Embedding model "${cfg.model}" returned an unexpected response`,
+    );
   }
 
   return embeddings.map(normalize);
@@ -129,7 +148,11 @@ function chunkNote(rel, text) {
 
     const size = buf.reduce((n, l) => n + l.length + 1, 0);
 
-    if (size + lines[i].length > CHUNK_CHARS && buf.length && lines[i].trim() === "") {
+    if (
+      size + lines[i].length > CHUNK_CHARS &&
+      buf.length &&
+      lines[i].trim() === ""
+    ) {
       flush();
       continue;
     }
@@ -152,7 +175,9 @@ function chunkNote(rel, text) {
     line: c.line,
     heading: c.heading,
     excerpt: c.body.replace(/\s+/g, " ").slice(0, EXCERPT_CHARS),
-    input: [title + (c.heading ? ` > ${c.heading}` : ""), c.body].filter(Boolean).join("\n"),
+    input: [title + (c.heading ? ` > ${c.heading}` : ""), c.body]
+      .filter(Boolean)
+      .join("\n"),
   }));
 }
 
@@ -163,12 +188,22 @@ function safeName(s) {
 // Up to 0.8.0 the index file was named after safeName() alone, so "My Vault" and "My_Vault" shared one file and
 // overwrote each other's index. The readable part stays, and a hash of the exact vault and model makes it unique.
 function legacyIndexFile(dataDir, vaultId, model) {
-  return path.join(dataDir, `semantic-${safeName(vaultId)}-${safeName(model)}.json`);
+  return path.join(
+    dataDir,
+    `semantic-${safeName(vaultId)}-${safeName(model)}.json`,
+  );
 }
 
 function indexFile(dataDir, vaultId, model) {
-  const hash = crypto.createHash("sha256").update(JSON.stringify([vaultId, model])).digest("hex").slice(0, 12);
-  return path.join(dataDir, `semantic-${safeName(vaultId)}-${safeName(model)}-${hash}.json`);
+  const hash = crypto
+    .createHash("sha256")
+    .update(JSON.stringify([vaultId, model]))
+    .digest("hex")
+    .slice(0, 12);
+  return path.join(
+    dataDir,
+    `semantic-${safeName(vaultId)}-${safeName(model)}-${hash}.json`,
+  );
 }
 
 // One index per vault, kept in memory and saved to the plugin's data folder. It is brought up to
@@ -205,7 +240,10 @@ class VaultIndex {
       const data = JSON.parse(await fs.promises.readFile(this.file, "utf-8"));
 
       // Written for another vault or model (should not happen with hashed names): start over rather than mix.
-      if ((data.vault !== undefined && data.vault !== this.vault.id) || (data.model !== undefined && data.model !== this.cfg.model)) {
+      if (
+        (data.vault !== undefined && data.vault !== this.vault.id) ||
+        (data.model !== undefined && data.model !== this.cfg.model)
+      ) {
         throw new Error("index belongs to another vault or model");
       }
 
@@ -215,14 +253,19 @@ class VaultIndex {
           chunks: n.chunks.map((c) => {
             // Small Buffers share a pooled ArrayBuffer, so copy out exactly this vector's bytes.
             const buf = Buffer.from(c.vec, "base64");
-            const bytes = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+            const bytes = buf.buffer.slice(
+              buf.byteOffset,
+              buf.byteOffset + buf.byteLength,
+            );
             return { ...c, vec: new Float32Array(bytes) };
           }),
         });
       }
     } catch (e) {
       if (e.code !== "ENOENT") {
-        this.log(`Semantic index for ${this.vault.id} unreadable, rebuilding: ${e.message}`);
+        this.log(
+          `Semantic index for ${this.vault.id} unreadable, rebuilding: ${e.message}`,
+        );
       }
     }
   }
@@ -234,17 +277,23 @@ class VaultIndex {
       return;
     }
 
-    const shared = this.enabledVaults().some((id) => id !== this.vault.id && safeName(id) === safeName(this.vault.id));
+    const shared = this.enabledVaults().some(
+      (id) => id !== this.vault.id && safeName(id) === safeName(this.vault.id),
+    );
 
     if (shared) {
-      this.log(`Semantic index for ${this.vault.id}: old index file is shared with another vault, rebuilding`);
+      this.log(
+        `Semantic index for ${this.vault.id}: old index file is shared with another vault, rebuilding`,
+      );
       return;
     }
 
     try {
       await fs.promises.rename(this.legacyFile, this.file);
     } catch (e) {
-      this.log(`Semantic index for ${this.vault.id}: old index file not moved, rebuilding: ${e.message}`);
+      this.log(
+        `Semantic index for ${this.vault.id}: old index file not moved, rebuilding: ${e.message}`,
+      );
     }
   }
 
@@ -263,13 +312,25 @@ class VaultIndex {
           line: c.line,
           heading: c.heading,
           excerpt: c.excerpt,
-          vec: Buffer.from(c.vec.buffer, c.vec.byteOffset, c.vec.byteLength).toString("base64"),
+          vec: Buffer.from(
+            c.vec.buffer,
+            c.vec.byteOffset,
+            c.vec.byteLength,
+          ).toString("base64"),
         })),
       };
     }
 
     const tmp = `${this.file}.tmp`;
-    await fs.promises.writeFile(tmp, JSON.stringify({ version: 1, vault: this.vault.id, model: this.cfg.model, notes }));
+    await fs.promises.writeFile(
+      tmp,
+      JSON.stringify({
+        version: 1,
+        vault: this.vault.id,
+        model: this.cfg.model,
+        notes,
+      }),
+    );
     await fs.promises.rename(tmp, this.file);
     this.dirty = false;
     this.lastSave = Date.now();
@@ -291,7 +352,10 @@ class VaultIndex {
           await this._sync();
         } catch (e) {
           // Only expected errors reach the model; others (file system) can name server paths.
-          this.lastError = e instanceof ToolError ? e.message : "indexing failed; details are in the Ignis log.";
+          this.lastError =
+            e instanceof ToolError
+              ? e.message
+              : "indexing failed; details are in the Ignis log.";
           this.log(`Semantic index for ${this.vault.id} failed: ${e.message}`);
           break;
         }
@@ -310,7 +374,11 @@ class VaultIndex {
     const changed = [];
     const unreadable = [];
 
-    for await (const file of walk(this.vault.root, this.vault.root, unreadable)) {
+    for await (const file of walk(
+      this.vault.root,
+      this.vault.root,
+      unreadable,
+    )) {
       if (path.extname(file.rel).toLowerCase() !== ".md") {
         continue;
       }
@@ -325,7 +393,11 @@ class VaultIndex {
       seen.add(file.rel);
       const known = this.notes.get(file.rel);
 
-      if (!known || known.mtimeMs !== stat.mtimeMs || known.size !== stat.size) {
+      if (
+        !known ||
+        known.mtimeMs !== stat.mtimeMs ||
+        known.size !== stat.size
+      ) {
         changed.push({ ...file, mtimeMs: stat.mtimeMs, size: stat.size });
       }
     }
@@ -336,7 +408,8 @@ class VaultIndex {
       throw new Error(`vault folder unreadable: ${this.vault.root}`);
     }
 
-    const inUnreadable = (rel) => unreadable.some((dir) => rel.startsWith(`${dir}/`));
+    const inUnreadable = (rel) =>
+      unreadable.some((dir) => rel.startsWith(`${dir}/`));
 
     for (const rel of this.notes.keys()) {
       if (!seen.has(rel) && !inUnreadable(rel)) {
@@ -349,25 +422,37 @@ class VaultIndex {
     this.pending = changed.length;
 
     if (changed.length) {
-      this.log(`Semantic index for ${this.vault.id}: embedding ${changed.length} changed note(s)`);
+      this.log(
+        `Semantic index for ${this.vault.id}: embedding ${changed.length} changed note(s)`,
+      );
     }
 
     for (const file of changed) {
-      const text = await fs.promises.readFile(file.abs, "utf-8").catch(() => null);
+      const text = await fs.promises
+        .readFile(file.abs, "utf-8")
+        .catch(() => null);
 
       if (text !== null) {
         const chunks = chunkNote(file.rel, text);
 
         for (let i = 0; i < chunks.length; i += BATCH) {
           const batch = chunks.slice(i, i + BATCH);
-          const vecs = await embed(this.cfg, batch.map((c) => c.input), this.log);
+          const vecs = await embed(
+            this.cfg,
+            batch.map((c) => c.input),
+            this.log,
+          );
           batch.forEach((c, j) => {
             c.vec = vecs[j];
             delete c.input;
           });
         }
 
-        this.notes.set(file.rel, { mtimeMs: file.mtimeMs, size: file.size, chunks });
+        this.notes.set(file.rel, {
+          mtimeMs: file.mtimeMs,
+          size: file.size,
+          chunks,
+        });
         this.dirty = true;
       }
 
@@ -435,7 +520,9 @@ class VaultIndex {
 
     if (dropped) {
       this.dirty = true;
-      this.log(`Semantic index for ${this.vault.id}: vector size changed, re-embedding affected notes`);
+      this.log(
+        `Semantic index for ${this.vault.id}: vector size changed, re-embedding affected notes`,
+      );
     }
 
     return dropped;
@@ -450,7 +537,12 @@ function getIndex(ctx, vault) {
   const key = `${vault.id}\0${vault.root}\0${cfg.model}`;
 
   if (!indexes.has(key)) {
-    indexes.set(key, new VaultIndex(vault, cfg, ctx.dataDir, ctx.log, () => ctx.getEnabledVaults()));
+    indexes.set(
+      key,
+      new VaultIndex(vault, cfg, ctx.dataDir, ctx.log, () =>
+        ctx.getEnabledVaults(),
+      ),
+    );
   }
 
   return indexes.get(key);
@@ -513,7 +605,8 @@ async function semanticSearch(ctx, vault, { query, folder, limit }) {
 
   if (!finished) {
     result.indexing = { pending: index.pending, total: index.total };
-    result.hint = "The index is still being built, so some notes are missing. Use search_notes as well, or try again later.";
+    result.hint =
+      "The index is still being built, so some notes are missing. Use search_notes as well, or try again later.";
   } else if (result.results.length === 0) {
     result.hint = "No notes indexed in this folder.";
   }

@@ -26,7 +26,9 @@ function requireBearer(tokens) {
   return (req, res, next) => {
     const m = /^Bearer\s+(.+)$/i.exec(req.get("authorization") || "");
     const presented = m ? sha256(m[1].trim()) : null;
-    const matches = presented ? known.filter(([, d]) => crypto.timingSafeEqual(presented, d)) : [];
+    const matches = presented
+      ? known.filter(([, d]) => crypto.timingSafeEqual(presented, d))
+      : [];
 
     if (matches.length > 0) {
       // A token set for several roles gets the narrowest of them.
@@ -34,11 +36,17 @@ function requireBearer(tokens) {
       return next();
     }
 
-    res.status(401).set("WWW-Authenticate", 'Bearer realm="ignis-mcp"').json({
-      jsonrpc: "2.0",
-      error: { code: -32001, message: "Unauthorized: missing or wrong bearer token" },
-      id: null,
-    });
+    res
+      .status(401)
+      .set("WWW-Authenticate", 'Bearer realm="ignis-mcp"')
+      .json({
+        jsonrpc: "2.0",
+        error: {
+          code: -32001,
+          message: "Unauthorized: missing or wrong bearer token",
+        },
+        id: null,
+      });
   };
 }
 
@@ -84,7 +92,12 @@ module.exports = {
       try {
         registerTools(server, ctx, {
           readOnly: req.mcpRole === "reader",
-          writable: req.mcpRole === "reader" ? [] : req.mcpRole === "admin" ? null : writePaths(),
+          writable:
+            req.mcpRole === "reader"
+              ? []
+              : req.mcpRole === "admin"
+                ? null
+                : writePaths(),
         });
         await server.connect(transport);
         await transport.handleRequest(req, res, req.body);
@@ -103,11 +116,14 @@ module.exports = {
 
     // Stateless mode has no server-initiated stream (GET) and no sessions to end (DELETE).
     const notAllowed = (req, res) => {
-      res.status(405).set("Allow", "POST").json({
-        jsonrpc: "2.0",
-        error: { code: -32000, message: "Method not allowed" },
-        id: null,
-      });
+      res
+        .status(405)
+        .set("Allow", "POST")
+        .json({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Method not allowed" },
+          id: null,
+        });
     };
     ctx.router.get("/", notAllowed);
     ctx.router.delete("/", notAllowed);
