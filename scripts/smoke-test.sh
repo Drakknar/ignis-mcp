@@ -208,7 +208,7 @@ echo "remember with the same title adds an update instead of a duplicate"
 call remember '{"text":"Also likes oolong.","title":"Prefers green tea","type":"preference"}' \
   | jq -e '.structuredContent.updated == true' >/dev/null
 grep -q '^## Update ' "$other/$mem"
-[ "$(ls "$other/Inbox" | grep -c 'green tea')" = 1 ]
+[ "$(find "$other/Inbox" -mindepth 1 -maxdepth 1 -name '*green tea*' | wc -l)" = 1 ]
 
 echo "remember dates episodes and keeps titles inside the inbox"
 call remember '{"text":"Boiler serviced.","title":"Boiler service","type":"episode"}' \
@@ -271,7 +271,10 @@ call write_note '{"vault":"Other","path":"Inbox/notes/New","content":"x"}' | jq 
 call write_note '{"vault":"Other","path":"Inbox/Dangling.md","content":"x"}' | jq -e '.isError == true' >/dev/null
 grep -qx 'changed by admin' "$other/Root.md"
 [ ! -e "$other/Notes/New.md" ] && grep -qx 'Not writable.' "$other/Notes/Kept.md"
-! docker exec ignis-smoke test -e /tmp/ignis-smoke-escape.md
+if docker exec ignis-smoke test -e /tmp/ignis-smoke-escape.md; then
+  echo "a write escaped the vault" >&2
+  exit 1
+fi
 
 echo "unexpected errors don't reveal server paths"
 mkdir -p "$other/Inbox/Folder.md"

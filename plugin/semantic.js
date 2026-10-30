@@ -568,7 +568,7 @@ function stopVault(vaultId) {
 }
 
 function stopAll() {
-  for (const id of [...timers.keys()]) {
+  for (const id of timers.keys()) {
     stopVault(id);
   }
 }

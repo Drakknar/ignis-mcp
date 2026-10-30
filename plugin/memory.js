@@ -29,6 +29,8 @@ function noteTitle(title, text) {
     (title || "").trim() || text.trim().split(/\s+/).slice(0, 8).join(" ");
 
   return source
+    // NUL and line breaks can't be in a file name.
+    // oxlint-disable-next-line no-control-regex
     .replace(/[/\\:*?"<>|#^[\]\r\n\t\0]+/g, " ")
     .replace(/\s+/g, " ")
     .replace(/^[\s.]+|[\s.,;!]+$/g, "")
