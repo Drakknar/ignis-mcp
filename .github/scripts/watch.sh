@@ -319,8 +319,14 @@ $body"
 		git commit -m "$title" -m "Proposed by the Claude upstream watch after reviewing $WATCH_SUBJECT."
 		git push origin "HEAD:refs/heads/$branch"
 		printf '%s' "$body$footer" >"$RUNNER_TEMP/watch-body.md"
-		pr_url=$(gh pr create -R "$repo" --base "$(gh api "repos/$repo" --jq .default_branch)" --head "$branch" \
-			--title "$title" --body-file "$RUNNER_TEMP/watch-body.md" --label "$labels" --assignee "$GITHUB_REPOSITORY_OWNER")
+		if ! pr_url=$(gh pr create -R "$repo" --base "$(gh api "repos/$repo" --jq .default_branch)" --head "$branch" \
+			--title "$title" --body-file "$RUNNER_TEMP/watch-body.md" --label "$labels" --assignee "$GITHUB_REPOSITORY_OWNER"); then
+			# Without a pull request nobody would see the branch: remove it, record
+			# nothing, and let the next run review again.
+			echo "::error::Couldn't open a pull request for $branch; deleting the branch"
+			git push origin --delete "$branch" || echo "::warning::Couldn't delete $branch; delete it by hand"
+			return 1
+		fi
 		echo "Pull request: $pr_url"
 		if $merge; then auto_merge "$pr_url" "$branch"; fi
 	elif [ "$status" = fixed ]; then
