@@ -1,5 +1,7 @@
 # ignis-mcp
 
+<img src="assets/icon.svg" alt="" width="96" align="right">
+
 [Ignis](https://github.com/Nystik-gh/ignis) (Obsidian as a self-hosted web app) with an extra **server plugin** that exposes your vaults to AI clients over [MCP](https://modelcontextprotocol.io).
 
 The image is upstream `nobbe/ignis:latest` with the plugin copied in. Nothing in upstream's code is changed. A GitHub Action checks every 6 hours and rebuilds `ghcr.io/drakknar/ignis` when upstream or the plugin changes. Before publishing, it smoke-tests every MCP tool against a throwaway vault. If a new upstream release breaks the plugin, nothing is published and the last working image stays in place.
